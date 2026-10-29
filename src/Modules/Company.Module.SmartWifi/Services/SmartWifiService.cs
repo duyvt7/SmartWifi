@@ -1,0 +1,582 @@
+using System.Runtime.InteropServices;
+using System.Text;
+using Company.Core.Abstractions.Enums;
+using Company.Core.Abstractions.Events;
+using Company.Core.Abstractions.Interfaces;
+using Company.Core.Abstractions.Models;
+using Company.Module.SmartWifi.Interop;
+
+namespace Company.Module.SmartWifi.Services;
+
+public class SmartWifiService : ISmartWifiService, IDisposable
+{
+    private readonly IConfigService _configService;
+    private readonly ILoggerService _logger;
+    private IntPtr _clientHandle = IntPtr.Zero;
+    private Guid _activeInterfaceGuid = Guid.Empty;
+    private string _activeInterfaceName = string.Empty;
+    private CancellationTokenSource? _cts;
+    private Task? _monitorTask;
+    private WifiConnectionInfo _currentConnection = new();
+
+    // Hysteresis candidate tracking: BSSID -> streak count
+    private readonly Dictionary<string, int> _roamCandidateStreaks = new();
+    private DateTime _lastScanTime = DateTime.MinValue;
+
+    public event EventHandler<WifiConnectionInfo>? ConnectionChanged;
+    public event EventHandler<WifiRoamingEventArgs>? Roamed;
+
+    public bool IsRunning => _monitorTask != null && !_monitorTask.IsCompleted;
+    public WifiConnectionInfo CurrentConnection => _currentConnection;
+
+    public SmartWifiService(IConfigService configService, ILoggerService logger)
+    {
+        _configService = configService;
+        _logger = logger;
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        if (IsRunning) return;
+
+        bool initialized = InitializeWlanHandle();
+        if (!initialized)
+        {
+            _logger.Log(AppLogLevel.Error, "SmartWifi", "Không thể khởi tạo Windows Native Wi-Fi API (wlanapi.dll).");
+            return;
+        }
+
+        // Auto-provision preferred profiles
+        await ProvisionProfilesFromConfigAsync();
+
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _monitorTask = Task.Run(() => MonitorLoopAsync(_cts.Token), _cts.Token);
+        _logger.Log(AppLogLevel.Info, "SmartWifi", $"Đã kích hoạt Smart Wi-Fi Monitor trên card mạng '{_activeInterfaceName}'.");
+    }
+
+    public async Task StopAsync()
+    {
+        if (_cts != null)
+        {
+            _cts.Cancel();
+            if (_monitorTask != null)
+            {
+                try { await _monitorTask; } catch (OperationCanceledException) { }
+            }
+            _cts.Dispose();
+            _cts = null;
+            _monitorTask = null;
+        }
+
+        CloseWlanHandle();
+        _logger.Log(AppLogLevel.Info, "SmartWifi", "Đã dừng dịch vụ Smart Wi-Fi.");
+    }
+
+    private bool InitializeWlanHandle()
+    {
+        if (_clientHandle != IntPtr.Zero) return true;
+
+        uint result = WlanNativeApi.WlanOpenHandle(
+            WlanNativeApi.WLAN_CLIENT_VERSION_VISTA,
+            IntPtr.Zero,
+            out _,
+            out _clientHandle);
+
+        if (result != 0 || _clientHandle == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        // Find wireless interface
+        result = WlanNativeApi.WlanEnumInterfaces(_clientHandle, IntPtr.Zero, out IntPtr pInterfaceList);
+        if (result != 0 || pInterfaceList == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        try
+        {
+            var listHeader = Marshal.PtrToStructure<WlanNativeApi.WLAN_INTERFACE_INFO_LIST>(pInterfaceList);
+            if (listHeader.dwNumberOfItems > 0)
+            {
+                IntPtr itemPtr = IntPtr.Add(pInterfaceList, Marshal.SizeOf<WlanNativeApi.WLAN_INTERFACE_INFO_LIST>());
+                var preferredAdapterName = _configService.CurrentConfig.WatchdogSettings.PreferredAdapterName;
+
+                for (int i = 0; i < listHeader.dwNumberOfItems; i++)
+                {
+                    var info = Marshal.PtrToStructure<WlanNativeApi.WLAN_INTERFACE_INFO>(itemPtr);
+                    if (string.IsNullOrWhiteSpace(preferredAdapterName) ||
+                        info.strInterfaceDescription.Contains(preferredAdapterName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _activeInterfaceGuid = info.InterfaceGuid;
+                        _activeInterfaceName = info.strInterfaceDescription;
+                        break;
+                    }
+
+                    if (i == 0) // Default to first interface if preferred not matched yet
+                    {
+                        _activeInterfaceGuid = info.InterfaceGuid;
+                        _activeInterfaceName = info.strInterfaceDescription;
+                    }
+
+                    itemPtr = IntPtr.Add(itemPtr, Marshal.SizeOf<WlanNativeApi.WLAN_INTERFACE_INFO>());
+                }
+                return _activeInterfaceGuid != Guid.Empty;
+            }
+        }
+        finally
+        {
+            WlanNativeApi.WlanFreeMemory(pInterfaceList);
+        }
+
+        return false;
+    }
+
+    private void CloseWlanHandle()
+    {
+        if (_clientHandle != IntPtr.Zero)
+        {
+            WlanNativeApi.WlanCloseHandle(_clientHandle, IntPtr.Zero);
+            _clientHandle = IntPtr.Zero;
+        }
+    }
+
+    private async Task MonitorLoopAsync(CancellationToken ct)
+    {
+        int tickCounter = 0;
+
+        while (!ct.IsCancellationRequested)
+        {
+            var passiveInterval = _configService.CurrentConfig.SmartWifiSettings.PassiveCheckIntervalSeconds;
+            if (passiveInterval <= 0) passiveInterval = 2;
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(passiveInterval), ct);
+                if (ct.IsCancellationRequested) break;
+
+                tickCounter++;
+
+                // 1. Passive query of current connection (0ms impact)
+                UpdateCurrentConnectionPassive();
+
+                // 2. Evaluate BSS Cache periodically
+                var bssInterval = _configService.CurrentConfig.SmartWifiSettings.BssCacheReadIntervalSeconds;
+                int bssTicks = Math.Max(1, bssInterval / passiveInterval);
+
+                if (tickCounter % bssTicks == 0)
+                {
+                    await EvaluateBssListAndRoamAsync();
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.Log(AppLogLevel.Warning, "SmartWifi", $"Lỗi trong vòng lặp SmartWifi: {ex.Message}");
+            }
+        }
+    }
+
+    private void UpdateCurrentConnectionPassive()
+    {
+        if (_clientHandle == IntPtr.Zero || _activeInterfaceGuid == Guid.Empty) return;
+
+        var guid = _activeInterfaceGuid;
+        uint result = WlanNativeApi.WlanQueryInterface(
+            _clientHandle,
+            ref guid,
+            WlanNativeApi.WLAN_INTF_OPCODE.wlan_intf_opcode_current_connection,
+            IntPtr.Zero,
+            out uint dataSize,
+            out IntPtr pData,
+            IntPtr.Zero);
+
+        if (result == 0 && pData != IntPtr.Zero)
+        {
+            try
+            {
+                var conn = Marshal.PtrToStructure<WlanNativeApi.WLAN_CONNECTION_ATTRIBUTES>(pData);
+                var ssid = conn.wlanAssociationAttributes.dot11Ssid.GetString();
+                var bssid = conn.wlanAssociationAttributes.GetBssidMac();
+                int quality = (int)conn.wlanAssociationAttributes.wlanSignalQuality;
+                int rssi = quality > 0 ? (quality / 2) - 100 : -100;
+
+                var state = conn.isState switch
+                {
+                    WlanNativeApi.WLAN_INTERFACE_STATE.wlan_interface_state_connected => WifiState.Connected,
+                    WlanNativeApi.WLAN_INTERFACE_STATE.wlan_interface_state_associating => WifiState.Connecting,
+                    WlanNativeApi.WLAN_INTERFACE_STATE.wlan_interface_state_authenticating => WifiState.Connecting,
+                    _ => WifiState.Disconnected
+                };
+
+                var info = new WifiConnectionInfo
+                {
+                    State = state,
+                    Ssid = ssid,
+                    Bssid = bssid,
+                    SignalQualityPercent = quality,
+                    RssiDbm = rssi,
+                    InterfaceName = _activeInterfaceName,
+                    InterfaceId = _activeInterfaceGuid,
+                    LinkSpeedMbps = (conn.wlanAssociationAttributes.ulRxRate + conn.wlanAssociationAttributes.ulTxRate) / 2000,
+                    LastUpdatedUtc = DateTime.UtcNow
+                };
+
+                _currentConnection = info;
+                ConnectionChanged?.Invoke(this, info);
+            }
+            finally
+            {
+                WlanNativeApi.WlanFreeMemory(pData);
+            }
+        }
+        else
+        {
+            if (_currentConnection.State != WifiState.Disconnected)
+            {
+                _currentConnection = new WifiConnectionInfo
+                {
+                    State = WifiState.Disconnected,
+                    InterfaceName = _activeInterfaceName,
+                    InterfaceId = _activeInterfaceGuid,
+                    LastUpdatedUtc = DateTime.UtcNow
+                };
+                ConnectionChanged?.Invoke(this, _currentConnection);
+            }
+        }
+    }
+
+    public async Task<IReadOnlyList<BssNetworkInfo>> GetNearbyBssListAsync(bool forceScan = false)
+    {
+        var list = new List<BssNetworkInfo>();
+        if (_clientHandle == IntPtr.Zero || _activeInterfaceGuid == Guid.Empty) return list;
+
+        var guid = _activeInterfaceGuid;
+
+        if (forceScan)
+        {
+            WlanNativeApi.WlanScan(_clientHandle, ref guid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+            await Task.Delay(2000); // Allow driver to populate cache
+        }
+
+        uint result = WlanNativeApi.WlanGetNetworkBssList(
+            _clientHandle,
+            ref guid,
+            IntPtr.Zero,
+            WlanNativeApi.DOT11_BSS_TYPE.dot11_BSS_type_infrastructure,
+            false,
+            IntPtr.Zero,
+            out IntPtr pBssList);
+
+        if (result == 0 && pBssList != IntPtr.Zero)
+        {
+            try
+            {
+                uint numItems = (uint)Marshal.ReadInt32(pBssList, 4); // dwNumberOfItems offset
+                IntPtr entryPtr = IntPtr.Add(pBssList, 8); // Offset to entries array
+
+                for (int i = 0; i < numItems; i++)
+                {
+                    var bss = Marshal.PtrToStructure<WlanNativeApi.WLAN_BSS_ENTRY>(entryPtr);
+                    var bssid = WlanNativeApi.FormatMac(bss.dot11Bssid);
+                    var ssid = bss.dot11Ssid.GetString();
+
+                    list.Add(new BssNetworkInfo
+                    {
+                        Ssid = ssid,
+                        Bssid = bssid,
+                        SignalQualityPercent = (int)bss.uLinkQuality,
+                        RssiDbm = bss.lRssi,
+                        Channel = WlanNativeApi.FrequencyToChannel(bss.ulChCenterFrequency),
+                        Band = WlanNativeApi.FrequencyToBand(bss.ulChCenterFrequency),
+                        IsConnected = string.Equals(bssid, _currentConnection.Bssid, StringComparison.OrdinalIgnoreCase)
+                    });
+
+                    // Advance to next entry (approximate structure size with padding)
+                    entryPtr = IntPtr.Add(entryPtr, Marshal.SizeOf<WlanNativeApi.WLAN_BSS_ENTRY>());
+                }
+            }
+            finally
+            {
+                WlanNativeApi.WlanFreeMemory(pBssList);
+            }
+        }
+
+        return list;
+    }
+
+    private async Task EvaluateBssListAndRoamAsync()
+    {
+        var settings = _configService.CurrentConfig.SmartWifiSettings;
+        if (!settings.EnableSmartRoaming) return;
+
+        // If signal is critical or disconnected, trigger active scan
+        if (_currentConnection.State != WifiState.Connected ||
+            _currentConnection.SignalQualityPercent < settings.WeakSignalThresholdPercent)
+        {
+            var secondsSinceScan = (DateTime.UtcNow - _lastScanTime).TotalSeconds;
+            if (secondsSinceScan >= 15) // Limit scan frequency to avoid channel hopping packet drops
+            {
+                var guid = _activeInterfaceGuid;
+                WlanNativeApi.WlanScan(_clientHandle, ref guid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                _lastScanTime = DateTime.UtcNow;
+            }
+        }
+
+        var bssList = await GetNearbyBssListAsync(forceScan: false);
+        if (bssList.Count == 0) return;
+
+        // 1. If currently connected, check if there is a better BSSID for current SSID
+        if (_currentConnection.State == WifiState.Connected && !string.IsNullOrWhiteSpace(_currentConnection.Ssid))
+        {
+            var sameSsidCandidates = bssList
+                .Where(b => string.Equals(b.Ssid, _currentConnection.Ssid, StringComparison.OrdinalIgnoreCase))
+                .Where(b => !string.Equals(b.Bssid, _currentConnection.Bssid, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(b => b.SignalQualityPercent)
+                .ToList();
+
+            var bestCandidate = sameSsidCandidates.FirstOrDefault();
+            if (bestCandidate != null)
+            {
+                int diff = bestCandidate.SignalQualityPercent - _currentConnection.SignalQualityPercent;
+                if (diff >= settings.RoamingHysteresisDeltaPercent)
+                {
+                    // Candidate qualifies, increment hysteresis streak
+                    _roamCandidateStreaks.TryGetValue(bestCandidate.Bssid, out int currentStreak);
+                    currentStreak++;
+                    _roamCandidateStreaks[bestCandidate.Bssid] = currentStreak;
+
+                    if (currentStreak >= 2)
+                    {
+                        _logger.Log(AppLogLevel.Info, "SmartWifi",
+                            $"Phát hiện Access Point '{bestCandidate.Bssid}' có sóng ({bestCandidate.SignalQualityPercent}%) vượt trội hơn trạm hiện tại ({_currentConnection.SignalQualityPercent}%). Tiến hành Fast Roaming...");
+
+                        bool roamed = await FastRoamToBssidAsync(bestCandidate.Bssid, bestCandidate.Ssid);
+                        if (roamed)
+                        {
+                            _roamCandidateStreaks.Clear();
+                            return;
+                        }
+                    }
+                }
+                else
+                {
+                    _roamCandidateStreaks.Clear();
+                }
+            }
+        }
+        else if (_currentConnection.State == WifiState.Disconnected)
+        {
+            // Auto connect to best preferred network
+            var preferred = settings.PreferredNetworks
+                .Where(p => p.AutoConnect)
+                .OrderBy(p => p.Priority)
+                .ToList();
+
+            foreach (var pref in preferred)
+            {
+                var candidate = bssList.FirstOrDefault(b => string.Equals(b.Ssid, pref.Ssid, StringComparison.OrdinalIgnoreCase));
+                if (candidate != null)
+                {
+                    _logger.Log(AppLogLevel.Info, "SmartWifi", $"Đang tự động kết nối lại vào mạng ưu tiên '{pref.Ssid}' (Sóng: {candidate.SignalQualityPercent}%)...");
+                    bool connected = await ConnectToPreferredProfileAsync(pref.Ssid, pref.Password);
+                    if (connected) break;
+                }
+            }
+        }
+    }
+
+    public Task<bool> FastRoamToBssidAsync(string bssid, string ssid)
+    {
+        if (_clientHandle == IntPtr.Zero || _activeInterfaceGuid == Guid.Empty)
+            return Task.FromResult(false);
+
+        byte[]? macBytes = WlanNativeApi.ParseMac(bssid);
+        if (macBytes == null) return Task.FromResult(false);
+
+        var oldBssid = _currentConnection.Bssid;
+        var oldQuality = _currentConnection.SignalQualityPercent;
+
+        IntPtr pBssidList = IntPtr.Zero;
+        try
+        {
+            int headerSize = Marshal.SizeOf<WlanNativeApi.DOT11_BSSID_LIST>();
+            int totalSize = headerSize + 6;
+            pBssidList = Marshal.AllocHGlobal(totalSize);
+
+            var bssidList = new WlanNativeApi.DOT11_BSSID_LIST
+            {
+                Header = new WlanNativeApi.NDIS_OBJECT_HEADER
+                {
+                    Type = 1,
+                    Revision = 1,
+                    Size = (ushort)totalSize
+                },
+                uNumOfEntries = 1,
+                uTotalNumOfEntries = 1
+            };
+
+            Marshal.StructureToPtr(bssidList, pBssidList, false);
+            IntPtr macDest = IntPtr.Add(pBssidList, headerSize);
+            Marshal.Copy(macBytes, 0, macDest, 6);
+
+            var connParams = new WlanNativeApi.WLAN_CONNECTION_PARAMETERS
+            {
+                wlanConnectionMode = WlanNativeApi.WLAN_CONNECTION_MODE.wlan_connection_mode_profile,
+                strProfile = ssid,
+                pDot11Ssid = IntPtr.Zero,
+                pDesiredBssidList = pBssidList,
+                dot11BssType = WlanNativeApi.DOT11_BSS_TYPE.dot11_BSS_type_infrastructure,
+                dwFlags = 0
+            };
+
+            var guid = _activeInterfaceGuid;
+            uint res = WlanNativeApi.WlanConnect(_clientHandle, ref guid, ref connParams, IntPtr.Zero);
+            bool success = (res == 0);
+
+            if (success)
+            {
+                _logger.Log(AppLogLevel.Success, "SmartWifi", $"Fast Roaming tới trạm phát '{bssid}' thành công (0ms downtime).");
+                Roamed?.Invoke(this, new WifiRoamingEventArgs
+                {
+                    Ssid = ssid,
+                    FromBssid = oldBssid,
+                    ToBssid = bssid,
+                    OldSignalQuality = oldQuality,
+                    NewSignalQuality = 0,
+                    Reason = "Sóng AP mới mạnh hơn ngưỡng Hysteresis"
+                });
+            }
+            else
+            {
+                _logger.Log(AppLogLevel.Warning, "SmartWifi", $"Lệnh Fast Roaming trả về mã lỗi: {res}");
+            }
+
+            return Task.FromResult(success);
+        }
+        catch (Exception ex)
+        {
+            _logger.Log(AppLogLevel.Error, "SmartWifi", $"Lỗi thực thi Fast Roam: {ex.Message}");
+            return Task.FromResult(false);
+        }
+        finally
+        {
+            if (pBssidList != IntPtr.Zero) Marshal.FreeHGlobal(pBssidList);
+        }
+    }
+
+    public async Task<bool> ConnectToPreferredProfileAsync(string ssid, string password)
+    {
+        if (_clientHandle == IntPtr.Zero || _activeInterfaceGuid == Guid.Empty)
+            return false;
+
+        // Ensure profile is installed
+        await SetWifiProfileXmlAsync(ssid, password);
+
+        var connParams = new WlanNativeApi.WLAN_CONNECTION_PARAMETERS
+        {
+            wlanConnectionMode = WlanNativeApi.WLAN_CONNECTION_MODE.wlan_connection_mode_profile,
+            strProfile = ssid,
+            pDot11Ssid = IntPtr.Zero,
+            pDesiredBssidList = IntPtr.Zero,
+            dot11BssType = WlanNativeApi.DOT11_BSS_TYPE.dot11_BSS_type_infrastructure,
+            dwFlags = 0
+        };
+
+        var guid = _activeInterfaceGuid;
+        uint res = WlanNativeApi.WlanConnect(_clientHandle, ref guid, ref connParams, IntPtr.Zero);
+        return res == 0;
+    }
+
+    public async Task TriggerEvaluationNowAsync()
+    {
+        await EvaluateBssListAndRoamAsync();
+    }
+
+    private async Task ProvisionProfilesFromConfigAsync()
+    {
+        var preferred = _configService.CurrentConfig.SmartWifiSettings.PreferredNetworks;
+        foreach (var net in preferred)
+        {
+            if (!string.IsNullOrWhiteSpace(net.Ssid))
+            {
+                await SetWifiProfileXmlAsync(net.Ssid, net.Password);
+            }
+        }
+    }
+
+    private Task<bool> SetWifiProfileXmlAsync(string ssid, string password)
+    {
+        if (_clientHandle == IntPtr.Zero || _activeInterfaceGuid == Guid.Empty)
+            return Task.FromResult(false);
+
+        string profileXml = GenerateWpa2PskProfileXml(ssid, password);
+        var guid = _activeInterfaceGuid;
+
+        uint res = WlanNativeApi.WlanSetProfile(
+            _clientHandle,
+            ref guid,
+            0,
+            profileXml,
+            null,
+            true,
+            IntPtr.Zero,
+            out uint reasonCode);
+
+        bool success = (res == 0);
+        if (success)
+        {
+            _logger.Log(AppLogLevel.Info, "SmartWifi", $"Đã nạp hồ sơ Wi-Fi Profile cho SSID '{ssid}'.");
+        }
+        else
+        {
+            _logger.Log(AppLogLevel.Warning, "SmartWifi", $"Không thể nạp hồ sơ SSID '{ssid}' (Mã lỗi: {res}, Reason: {reasonCode}).");
+        }
+
+        return Task.FromResult(success);
+    }
+
+    private static string GenerateWpa2PskProfileXml(string ssid, string password)
+    {
+        // Generate hex-encoded SSID for XML
+        var ssidBytes = Encoding.UTF8.GetBytes(ssid);
+        var hexSsid = string.Concat(ssidBytes.Select(b => b.ToString("X2")));
+
+        return $@"<?xml version=""1.0""?>
+<WLANProfile xmlns=""http://www.microsoft.com/networking/WLAN/profile/v1"">
+    <name>{ssid}</name>
+    <SSIDConfig>
+        <SSID>
+            <hex>{hexSsid}</hex>
+            <name>{ssid}</name>
+        </SSID>
+    </SSIDConfig>
+    <connectionType>ESS</connectionType>
+    <connectionMode>auto</connectionMode>
+    <MSM>
+        <security>
+            <authEncryption>
+                <authentication>WPA2PSK</authentication>
+                <encryption>AES</encryption>
+                <useOneX>false</useOneX>
+            </authEncryption>
+            <sharedKey>
+                <keyType>passPhrase</keyType>
+                <protected>false</protected>
+                <keyMaterial>{password}</keyMaterial>
+            </sharedKey>
+        </security>
+    </MSM>
+</WLANProfile>";
+    }
+
+    public void Dispose()
+    {
+        StopAsync().GetAwaiter().GetResult();
+        CloseWlanHandle();
+    }
+}
+

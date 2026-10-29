@@ -1,0 +1,229 @@
+using System.Net.NetworkInformation;
+using System.Text;
+using Company.Core.Abstractions.Enums;
+using Company.Core.Abstractions.Events;
+using Company.Core.Abstractions.Interfaces;
+using Company.Core.Abstractions.Models;
+
+namespace Company.Module.NetworkWatchdog.Services;
+
+public class ConnectionWatchdogService : IConnectionWatchdogService
+{
+    private readonly IConfigService _configService;
+    private readonly INetworkAdapterManager _adapterManager;
+    private readonly ILoggerService _logger;
+    private CancellationTokenSource? _cts;
+    private Task? _workerTask;
+    private int _disconnectedSeconds = 0;
+    private DateTime _lastResetTime = DateTime.MinValue;
+    private List<ServerPingStatus> _lastStatuses = new();
+    private readonly byte[] _pingBuffer = Encoding.ASCII.GetBytes("CRANE_WIFI_WATCHDOG_PING_PACKET");
+
+    public event EventHandler<WatchdogTickEventArgs>? WatchdogTick;
+    public event EventHandler<AdapterResettingEventArgs>? AdapterResetting;
+    public event EventHandler? AdapterResetCompleted;
+
+    public bool IsRunning => _workerTask != null && !_workerTask.IsCompleted;
+    public int CurrentDisconnectedSeconds => _disconnectedSeconds;
+    public IReadOnlyList<ServerPingStatus> LastKnownStatuses => _lastStatuses.AsReadOnly();
+
+    public ConnectionWatchdogService(
+        IConfigService configService,
+        INetworkAdapterManager adapterManager,
+        ILoggerService logger)
+    {
+        _configService = configService;
+        _adapterManager = adapterManager;
+        _logger = logger;
+    }
+
+    public Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        if (IsRunning) return Task.CompletedTask;
+
+        _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _workerTask = Task.Run(() => WatchdogLoopAsync(_cts.Token), _cts.Token);
+        _logger.Log(AppLogLevel.Info, "Watchdog", "Đã khởi chạy dịch vụ Connection Watchdog giám sát Server.");
+        return Task.CompletedTask;
+    }
+
+    public async Task StopAsync()
+    {
+        if (_cts != null)
+        {
+            _cts.Cancel();
+            if (_workerTask != null)
+            {
+                try
+                {
+                    await _workerTask;
+                }
+                catch (OperationCanceledException) { }
+            }
+            _cts.Dispose();
+            _cts = null;
+            _workerTask = null;
+            _logger.Log(AppLogLevel.Info, "Watchdog", "Đã dừng dịch vụ Connection Watchdog.");
+        }
+    }
+
+    public async Task TriggerCheckNowAsync()
+    {
+        await PerformSingleCheckAsync();
+    }
+
+    private async Task WatchdogLoopAsync(CancellationToken ct)
+    {
+        // Immediate check on startup
+        await PerformSingleCheckAsync();
+
+        while (!ct.IsCancellationRequested)
+        {
+            var interval = _configService.CurrentConfig.WatchdogSettings.CheckIntervalSeconds;
+            if (interval <= 0) interval = 5;
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(interval), ct);
+                if (ct.IsCancellationRequested) break;
+
+                await PerformSingleCheckAsync();
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.Log(AppLogLevel.Warning, "Watchdog", $"Lỗi vòng lặp Watchdog: {ex.Message}");
+            }
+        }
+    }
+
+    private async Task PerformSingleCheckAsync()
+    {
+        var settings = _configService.CurrentConfig.WatchdogSettings;
+        var activeServers = settings.TargetServers.Where(s => s.IsEnabled).ToList();
+
+        if (activeServers.Count == 0)
+        {
+            _disconnectedSeconds = 0;
+            return;
+        }
+
+        // Ping all servers concurrently
+        var tasks = activeServers.Select(s => PingServerAsync(s, settings.PingTimeoutMs)).ToList();
+        var results = await Task.WhenAll(tasks);
+        _lastStatuses = results.ToList();
+
+        bool anyOnline = results.Any(r => r.IsOnline);
+        long bestLatency = results.Where(r => r.IsOnline).Select(r => r.RoundtripTimeMs).DefaultIfEmpty(-1).Min();
+
+        if (anyOnline)
+        {
+            if (_disconnectedSeconds > 0)
+            {
+                _logger.Log(AppLogLevel.Success, "Watchdog", $"Kết nối máy chủ đã phục hồi sau {_disconnectedSeconds}s mất tín hiệu.");
+            }
+            _disconnectedSeconds = 0;
+        }
+        else
+        {
+            _disconnectedSeconds += settings.CheckIntervalSeconds;
+            _logger.Log(AppLogLevel.Warning, "Watchdog", $"Toàn bộ máy chủ không phản hồi! Thời gian gián đoạn: {_disconnectedSeconds}s / {settings.MaxDisconnectedSecondsBeforeReset}s");
+
+            var timeSinceLastReset = (DateTime.UtcNow - _lastResetTime).TotalSeconds;
+            if (_disconnectedSeconds >= settings.MaxDisconnectedSecondsBeforeReset && timeSinceLastReset >= settings.ResetCooldownSeconds)
+            {
+                await TriggerSelfHealingResetAsync(settings);
+            }
+        }
+
+        try
+        {
+            WatchdogTick?.Invoke(this, new WatchdogTickEventArgs
+            {
+                ServerStatuses = _lastStatuses,
+                AnyServerOnline = anyOnline,
+                CurrentDisconnectedDurationSeconds = _disconnectedSeconds,
+                BestLatencyMs = bestLatency,
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        catch
+        {
+            // Suppress event subscriber exceptions
+        }
+    }
+
+    private async Task<ServerPingStatus> PingServerAsync(TargetServer server, int timeoutMs)
+    {
+        var status = new ServerPingStatus
+        {
+            Target = server,
+            LastCheckedUtc = DateTime.UtcNow
+        };
+
+        try
+        {
+            using var ping = new Ping();
+            var reply = await ping.SendPingAsync(server.Address, timeoutMs, _pingBuffer);
+            if (reply.Status == IPStatus.Success)
+            {
+                status.IsOnline = true;
+                status.RoundtripTimeMs = reply.RoundtripTime;
+            }
+            else
+            {
+                status.IsOnline = false;
+                status.ErrorMessage = reply.Status.ToString();
+            }
+        }
+        catch (Exception ex)
+        {
+            status.IsOnline = false;
+            status.ErrorMessage = ex.InnerException?.Message ?? ex.Message;
+        }
+
+        return status;
+    }
+
+    private async Task TriggerSelfHealingResetAsync(WatchdogSettings settings)
+    {
+        var wifiAdapter = await _adapterManager.GetActiveWifiAdapterAsync(settings.PreferredAdapterName);
+        var adapterName = wifiAdapter?.Name ?? settings.PreferredAdapterName ?? "Wi-Fi";
+
+        _logger.Log(AppLogLevel.Error, "Watchdog", $"KÍCH HOẠT TỰ CỨU HỘ: Mất kết nối liên tục {_disconnectedSeconds}s vượt ngưỡng {settings.MaxDisconnectedSecondsBeforeReset}s. Đang reset card mạng '{adapterName}'...");
+
+        try
+        {
+            AdapterResetting?.Invoke(this, new AdapterResettingEventArgs
+            {
+                AdapterName = adapterName,
+                DisconnectedDurationSeconds = _disconnectedSeconds,
+                Reason = "Mất kết nối toàn bộ Server vượt ngưỡng thời gian cho phép",
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        catch { }
+
+        _lastResetTime = DateTime.UtcNow;
+        var resetSuccess = await _adapterManager.ResetAdapterAsync(adapterName);
+
+        if (resetSuccess)
+        {
+            _logger.Log(AppLogLevel.Success, "Watchdog", $"Reset card mạng hoàn tất. Thiết lập thời gian chờ phục hồi (Cooldown) {settings.ResetCooldownSeconds}s.");
+        }
+        else
+        {
+            _logger.Log(AppLogLevel.Error, "Watchdog", "Không thể reset card mạng!");
+        }
+
+        try
+        {
+            AdapterResetCompleted?.Invoke(this, EventArgs.Empty);
+        }
+        catch { }
+    }
+}
+
