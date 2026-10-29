@@ -35,35 +35,95 @@ public class OsModeService : IOsModeService
         };
     }
 
-    public Task<bool> EnsureAirplaneModeDisabledAsync()
+    public Task<bool> IsAirplaneModeEnabledAsync()
     {
-        bool success = false;
-
-        // 1. Enforce Registry RadioManagement SystemRadioState = 0 (Airplane Mode OFF)
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement", writable: true);
-            if (key != null)
+            // 1. Check Subkey HKLM\SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState (default value)
+            using var subKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState");
+            if (subKey != null)
             {
-                var state = key.GetValue("SystemRadioState");
-                if (state != null && Convert.ToInt32(state) != 0)
+                var val = subKey.GetValue("");
+                if (val != null && Convert.ToInt32(val) == 1)
                 {
-                    key.SetValue("SystemRadioState", 0, RegistryValueKind.DWord);
-                    _logger.Log(AppLogLevel.Info, "OsTweaks", "Đã ép tắt Airplane Mode qua Registry SystemRadioState=0.");
+                    return Task.FromResult(true);
                 }
-                success = true;
             }
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Non-elevated fallback
+
+            // 2. Check parent key value
+            using var parentKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement");
+            if (parentKey != null)
+            {
+                var val = parentKey.GetValue("SystemRadioState");
+                if (val != null && Convert.ToInt32(val) == 1)
+                {
+                    return Task.FromResult(true);
+                }
+            }
         }
         catch (Exception ex)
         {
-            _logger.Log(AppLogLevel.Warning, "OsTweaks", $"Lỗi ghi Registry RadioManagement: {ex.Message}");
+            _logger.Log(AppLogLevel.Warning, "OsTweaks", $"Lỗi đọc trạng thái Airplane Mode: {ex.Message}");
         }
 
-        // 2. Ensure WlanSvc (WLAN AutoConfig) Windows Service is running
+        return Task.FromResult(false);
+    }
+
+    public Task<bool> IsTabletModeEnabledAsync()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\ImmersiveShell");
+            if (key != null)
+            {
+                var val = key.GetValue("TabletMode");
+                if (val != null && Convert.ToInt32(val) == 1)
+                {
+                    return Task.FromResult(true);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Log(AppLogLevel.Warning, "OsTweaks", $"Lỗi đọc trạng thái Tablet Mode: {ex.Message}");
+        }
+
+        return Task.FromResult(false);
+    }
+
+    public Task<bool> DisableAirplaneModeAsync()
+    {
+        bool changed = false;
+
+        try
+        {
+            // 1. Set SystemRadioState subkey default value to 0
+            using var subKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState", writable: true);
+            if (subKey != null)
+            {
+                subKey.SetValue("", 0, RegistryValueKind.DWord);
+                changed = true;
+            }
+
+            // 2. Set SystemRadioState in parent key to 0
+            using var parentKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement", writable: true);
+            if (parentKey != null)
+            {
+                parentKey.SetValue("SystemRadioState", 0, RegistryValueKind.DWord);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                _logger.Log(AppLogLevel.Success, "OsTweaks", "ĐÃ TẮT CHẾ ĐỘ MÁY BAY: Đặt SystemRadioState = 0.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.Log(AppLogLevel.Warning, "OsTweaks", $"Lỗi vô hiệu hóa Airplane Mode trong Registry: {ex.Message}");
+        }
+
+        // 3. Ensure WlanSvc (WLAN AutoConfig) is running
         try
         {
             var psi = new ProcessStartInfo
@@ -71,56 +131,79 @@ public class OsModeService : IOsModeService
                 FileName = "sc.exe",
                 Arguments = "start WlanSvc",
                 CreateNoWindow = true,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
+                UseShellExecute = false
             };
             using var proc = Process.Start(psi);
             proc?.WaitForExit(1000);
         }
-        catch
-        {
-            // Ignore
-        }
+        catch { }
 
-        return Task.FromResult(success);
+        // 4. Ensure Wi-Fi adapter is enabled via netsh
+        try
+        {
+            var psiNetsh = new ProcessStartInfo
+            {
+                FileName = "netsh.exe",
+                Arguments = "interface set interface name=\"Wi-Fi\" admin=enable",
+                CreateNoWindow = true,
+                UseShellExecute = false
+            };
+            using var procNetsh = Process.Start(psiNetsh);
+            procNetsh?.WaitForExit(1500);
+        }
+        catch { }
+
+        return Task.FromResult(true);
     }
 
-    public Task<bool> EnsureTabletModeDisabledAsync()
+    public Task<bool> DisableTabletModeAsync()
     {
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\ImmersiveShell", writable: true);
             if (key != null)
             {
-                var tabletMode = key.GetValue("TabletMode");
-                var signInMode = key.GetValue("SignInMode");
-
-                bool changed = false;
-                if (tabletMode == null || Convert.ToInt32(tabletMode) != 0)
-                {
-                    key.SetValue("TabletMode", 0, RegistryValueKind.DWord);
-                    changed = true;
-                }
-                if (signInMode == null || Convert.ToInt32(signInMode) != 1)
-                {
-                    key.SetValue("SignInMode", 1, RegistryValueKind.DWord);
-                    changed = true;
-                }
-
-                if (changed)
-                {
-                    _logger.Log(AppLogLevel.Info, "OsTweaks", "Đã khóa chế độ Tablet Mode về Desktop Mode (TabletMode=0, SignInMode=1).");
-                }
+                key.SetValue("TabletMode", 0, RegistryValueKind.DWord);
+                key.SetValue("SignInMode", 1, RegistryValueKind.DWord);
+                _logger.Log(AppLogLevel.Success, "OsTweaks", "ĐÃ TẮT CHẾ ĐỘ TABLET: Khóa về Desktop Mode (TabletMode=0, SignInMode=1).");
                 return Task.FromResult(true);
             }
         }
         catch (Exception ex)
         {
-            _logger.Log(AppLogLevel.Warning, "OsTweaks", $"Lỗi ghi Registry TabletMode: {ex.Message}");
+            _logger.Log(AppLogLevel.Warning, "OsTweaks", $"Lỗi vô hiệu hóa Tablet Mode: {ex.Message}");
         }
 
         return Task.FromResult(false);
+    }
+
+    public async Task<bool> CheckAndDisableIfActiveAsync()
+    {
+        bool wasAirplaneActive = await IsAirplaneModeEnabledAsync();
+        bool wasTabletActive = await IsTabletModeEnabledAsync();
+
+        if (wasAirplaneActive || wasTabletActive)
+        {
+            _logger.Log(AppLogLevel.Warning, "OsTweaks", 
+                $"Phát hiện chế độ can thiệp đang BẬT: [Airplane Mode: {(wasAirplaneActive ? "BẬT" : "Tắt")}, Tablet Mode: {(wasTabletActive ? "BẬT" : "Tắt")}]. Đang tự động tắt...");
+
+            if (wasAirplaneActive) await DisableAirplaneModeAsync();
+            if (wasTabletActive) await DisableTabletModeAsync();
+
+            return true;
+        }
+
+        return false;
+    }
+
+    public Task<bool> EnsureAirplaneModeDisabledAsync()
+    {
+        return DisableAirplaneModeAsync();
+    }
+
+    public Task<bool> EnsureTabletModeDisabledAsync()
+    {
+        return DisableTabletModeAsync();
     }
 
     public Task<bool> IsAutoStartRegisteredAsync()
@@ -248,22 +331,28 @@ public class OsModeService : IOsModeService
 
         while (!ct.IsCancellationRequested)
         {
-            var intervalSeconds = _configService.CurrentConfig.SystemSettings.EnforceOsModesIntervalSeconds;
-            if (intervalSeconds <= 0) intervalSeconds = 10;
-
+            // Check frequently (every 3 seconds) to immediately block if user turns on Airplane or Tablet mode
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), ct);
+                await Task.Delay(TimeSpan.FromSeconds(3), ct);
                 if (ct.IsCancellationRequested) break;
 
                 if (_configService.CurrentConfig.SystemSettings.DisableAirplaneModeOnStartup)
                 {
-                    await EnsureAirplaneModeDisabledAsync();
+                    bool isAirplaneOn = await IsAirplaneModeEnabledAsync();
+                    if (isAirplaneOn)
+                    {
+                        await DisableAirplaneModeAsync();
+                    }
                 }
 
                 if (_configService.CurrentConfig.SystemSettings.DisableTabletModeOnStartup)
                 {
-                    await EnsureTabletModeDisabledAsync();
+                    bool isTabletOn = await IsTabletModeEnabledAsync();
+                    if (isTabletOn)
+                    {
+                        await DisableTabletModeAsync();
+                    }
                 }
             }
             catch (OperationCanceledException)

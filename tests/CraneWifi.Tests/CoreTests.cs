@@ -1,6 +1,9 @@
 using Company.Core.Abstractions.Enums;
+using Company.Core.Abstractions.Interfaces;
 using Company.Core.Abstractions.Models;
 using Company.Module.ConfigManager.Services;
+using Company.Module.NetworkWatchdog.Services;
+using Company.Module.OsTweaks.Services;
 using Xunit;
 
 namespace CraneWifi.Tests;
@@ -93,11 +96,39 @@ public class CoreTests
     [InlineData("", false)]
     public void MacParsing_ValidatesCorrectly(string macStr, bool expectedValid)
     {
-        // Simple MAC parser validation
         var parts = macStr.Split(new[] { ':', '-' }, StringSplitOptions.RemoveEmptyEntries);
         bool isValid = parts.Length == 6 && parts.All(p => byte.TryParse(p, System.Globalization.NumberStyles.HexNumber, null, out _));
 
         Assert.Equal(expectedValid, isValid);
     }
-}
 
+    [Fact]
+    public async Task OsModeService_CanQueryModesWithoutCrashing()
+    {
+        var configService = new ConfigService();
+        var logger = new RollingFileLoggerService();
+        var osService = new OsModeService(configService, logger);
+
+        // Should query without crashing on current machine
+        bool isAirplane = await osService.IsAirplaneModeEnabledAsync();
+        bool isTablet = await osService.IsTabletModeEnabledAsync();
+
+        Assert.False(isAirplane); // On our dev machine airplane is off
+        Assert.False(isTablet);
+    }
+
+    [Fact]
+    public void WatchdogService_ConstructsWithOsModeService()
+    {
+        var configService = new ConfigService();
+        var logger = new RollingFileLoggerService();
+        var osService = new OsModeService(configService, logger);
+        var adapterMgr = new NetworkAdapterManager(logger);
+
+        var watchdog = new ConnectionWatchdogService(configService, adapterMgr, osService, logger);
+
+        Assert.NotNull(watchdog);
+        Assert.False(watchdog.IsRunning);
+        Assert.Equal(0, watchdog.CurrentDisconnectedSeconds);
+    }
+}

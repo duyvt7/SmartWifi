@@ -1,10 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
@@ -23,6 +22,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Modules\Company.Core.Abstractions\Company.Core.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\Modules\Company.Module.ConfigManager\Company.Module.ConfigManager.csproj" />
+    <ProjectReference Include="..\..\src\Modules\Company.Module.NetworkWatchdog\Company.Module.NetworkWatchdog.csproj" />
+    <ProjectReference Include="..\..\src\Modules\Company.Module.OsTweaks\Company.Module.OsTweaks.csproj" />
   </ItemGroup>
 
 </Project>

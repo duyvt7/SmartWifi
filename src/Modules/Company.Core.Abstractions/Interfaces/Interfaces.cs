@@ -22,6 +22,11 @@ public interface ILoggerService
 public interface IOsModeService
 {
     Task<SystemModeStatus> EnforceOsModesAsync();
+    Task<bool> IsAirplaneModeEnabledAsync();
+    Task<bool> IsTabletModeEnabledAsync();
+    Task<bool> DisableAirplaneModeAsync();
+    Task<bool> DisableTabletModeAsync();
+    Task<bool> CheckAndDisableIfActiveAsync();
     Task<bool> EnsureAirplaneModeDisabledAsync();
     Task<bool> EnsureTabletModeDisabledAsync();
     Task<bool> IsAutoStartRegisteredAsync();

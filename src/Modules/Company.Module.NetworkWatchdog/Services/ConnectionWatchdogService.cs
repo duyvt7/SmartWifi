@@ -11,6 +11,7 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
 {
     private readonly IConfigService _configService;
     private readonly INetworkAdapterManager _adapterManager;
+    private readonly IOsModeService _osModeService;
     private readonly ILoggerService _logger;
     private CancellationTokenSource? _cts;
     private Task? _workerTask;
@@ -30,10 +31,12 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
     public ConnectionWatchdogService(
         IConfigService configService,
         INetworkAdapterManager adapterManager,
+        IOsModeService osModeService,
         ILoggerService logger)
     {
         _configService = configService;
         _adapterManager = adapterManager;
+        _osModeService = osModeService;
         _logger = logger;
     }
 
@@ -190,10 +193,49 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
 
     private async Task TriggerSelfHealingResetAsync(WatchdogSettings settings)
     {
+        // BƯỚC 1: Kiểm tra trạng thái Airplane Mode & Tablet Mode trước khi can thiệp phần cứng
+        bool isAirplaneOn = await _osModeService.IsAirplaneModeEnabledAsync();
+        bool isTabletOn = await _osModeService.IsTabletModeEnabledAsync();
+
+        if (isAirplaneOn || isTabletOn)
+        {
+            _logger.Log(AppLogLevel.Warning, "Watchdog", 
+                $"PHÁT HIỆN NGUYÊN NHÂN MẤT MẠNG: [Chế độ Máy bay: {(isAirplaneOn ? "ĐANG BẬT" : "Tắt")}, Tablet Mode: {(isTabletOn ? "ĐANG BẬT" : "Tắt")}]. " +
+                "Tiến hành tắt các chế độ này trước khi can thiệp reset card mạng...");
+
+            await _osModeService.CheckAndDisableIfActiveAsync();
+
+            // Đợi 4 giây để card mạng và Wi-Fi tự động tái kết nối
+            await Task.Delay(4000);
+
+            // Kiểm tra lại kết nối ngay lập tức
+            var activeServers = settings.TargetServers.Where(s => s.IsEnabled).ToList();
+            if (activeServers.Count > 0)
+            {
+                var checkTasks = activeServers.Select(s => PingServerAsync(s, settings.PingTimeoutMs)).ToList();
+                var checkResults = await Task.WhenAll(checkTasks);
+
+                if (checkResults.Any(r => r.IsOnline))
+                {
+                    _logger.Log(AppLogLevel.Success, "Watchdog", 
+                        "KẾT NỐI MẠNG ĐÃ PHỤC HỒI THÀNH CÔNG ngay sau khi tắt Airplane/Tablet Mode! Không cần reset card mạng.");
+                    _disconnectedSeconds = 0;
+                    return;
+                }
+                else
+                {
+                    _logger.Log(AppLogLevel.Warning, "Watchdog", 
+                        "Đã tắt Airplane/Tablet Mode nhưng vẫn chưa thông mạng tới Server. Chuyển sang bước Reset card mạng...");
+                }
+            }
+        }
+
+        // BƯỚC 2: Nếu không phải do Airplane/Tablet Mode, hoặc đã tắt rồi mà vẫn mất mạng -> Tiến hành Reset card mạng
         var wifiAdapter = await _adapterManager.GetActiveWifiAdapterAsync(settings.PreferredAdapterName);
         var adapterName = wifiAdapter?.Name ?? settings.PreferredAdapterName ?? "Wi-Fi";
 
-        _logger.Log(AppLogLevel.Error, "Watchdog", $"KÍCH HOẠT TỰ CỨU HỘ: Mất kết nối liên tục {_disconnectedSeconds}s vượt ngưỡng {settings.MaxDisconnectedSecondsBeforeReset}s. Đang reset card mạng '{adapterName}'...");
+        _logger.Log(AppLogLevel.Error, "Watchdog", 
+            $"KÍCH HOẠT RESET CARD MẠNG: Mất kết nối liên tục {_disconnectedSeconds}s vượt ngưỡng {settings.MaxDisconnectedSecondsBeforeReset}s. Đang reset '{adapterName}'...");
 
         try
         {
@@ -226,4 +268,3 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
         catch { }
     }
 }
-
