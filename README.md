@@ -4,6 +4,19 @@
 
 ---
 
+## ⚡ HƯỚNG DẪN KHỞI ĐỘNG NHANH (QUICK START)
+
+Sau khi clone hoặc bấm **Code > Download ZIP** từ GitHub về máy tính:
+
+1. **Giải nén thư mục ZIP** (nếu tải dạng nén).
+2. **Nhấp đúp vào file `Start.bat`** ở thư mục gốc:
+   - File thực thi siêu nhẹ [**`App_SingleFile/CraneWifiController.exe`**](file:///d:/Application/SmartWifi/App_SingleFile/CraneWifiController.exe) (chỉ 827 KB) **đã được đóng gói sẵn** bên trong thư mục.
+   - Ứng dụng sẽ tự động yêu cầu quyền Administrator và mở Mini-Widget giám sát ở góc màn hình.
+3. **Lưu ý về môi trường:** 
+   - Ứng dụng yêu cầu máy tính đã cài **[.NET Desktop Runtime 8.0 (x64)](https://dotnet.microsoft.com/download/dotnet/8.0/runtime)** của Microsoft. Nếu máy tính cẩu chưa có, `Start.bat` sẽ hiện thông báo hướng dẫn tải và cài đặt trong 1 phút.
+
+---
+
 ## 🌟 Tính Năng Nổi Bật
 
 * **Kiến trúc Modular Độc lập (Clean Architecture):** 5 thư viện Class Library (.dll) độc lập hoàn toàn với tầng Presentation (WPF), có thể tái sử dụng hoặc đóng gói NuGet.
@@ -31,6 +44,10 @@
 ```text
 CraneWifiController/
 │
+├── App_SingleFile/
+│   ├── CraneWifiController.exe              # File chạy siêu nhẹ 827 KB có sẵn
+│   └── appsettings.json                     # Cấu hình IP và Wi-Fi plaintext
+│
 ├── src/
 │   ├── Modules/
 │   │   ├── Company.Core.Abstractions/       # Interfaces, Enums, DTOs, Events
@@ -46,12 +63,14 @@ CraneWifiController/
 │   └── CraneWifi.Tests/                     # Bộ kiểm thử đơn vị xUnit (7/7 Passed)
 │
 ├── CraneWifiController.sln
+├── Start.bat                                # Trình kích hoạt 1-click có kiểm tra Administrator
+├── README.md
 └── PLAN.md
 ```
 
 ---
 
-## 🚀 Hướng Dẫn Biên Dịch & Chạy Thử
+## 🚀 Hướng Dẫn Biên Dịch Từ Mã Nguồn (Dành cho Lập trình viên)
 
 ### Yêu cầu:
 * Windows 10/11 (64-bit).
@@ -62,13 +81,12 @@ CraneWifiController/
 dotnet build CraneWifiController.sln -c Release
 ```
 
-### Chạy ứng dụng trực tiếp:
+### Chạy ứng dụng từ mã nguồn:
 ```powershell
 dotnet run --project src/Presentation/CraneWifi.WidgetApp/CraneWifi.WidgetApp.csproj
 ```
 
-### Đóng gói thành 1 file .exe duy nhất:
+### Đóng gói lại thành 1 file .exe duy nhất:
 ```powershell
 dotnet publish src/Presentation/CraneWifi.WidgetApp/CraneWifi.WidgetApp.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish/lightweight
 ```
-File thực thi tạo ra sẽ nằm tại `publish/lightweight/CraneWifi.WidgetApp.exe` (dung lượng ~827 KB).

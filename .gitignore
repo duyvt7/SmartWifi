@@ -15,7 +15,6 @@ bld/
 
 # Generated distribution / artifacts
 publish/
-App_SingleFile/
 App_Standalone/
 
 # Visual Studio / Rider / VS Code
@@ -42,3 +41,4 @@ TestResults/
 packages/
 project.lock.json
 project.assets.json
+
