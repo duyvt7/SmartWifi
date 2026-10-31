@@ -13,10 +13,12 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
     private readonly INetworkAdapterManager _adapterManager;
     private readonly IOsModeService _osModeService;
     private readonly ILoggerService _logger;
+    private readonly ISmartWifiService? _smartWifiService;
     private CancellationTokenSource? _cts;
     private Task? _workerTask;
     private int _disconnectedSeconds = 0;
     private DateTime _lastResetTime = DateTime.MinValue;
+    private DateTime _lastFailoverTime = DateTime.MinValue;
     private List<ServerPingStatus> _lastStatuses = new();
     private readonly byte[] _pingBuffer = Encoding.ASCII.GetBytes("CRANE_WIFI_WATCHDOG_PING_PACKET");
 
@@ -32,12 +34,14 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
         IConfigService configService,
         INetworkAdapterManager adapterManager,
         IOsModeService osModeService,
-        ILoggerService logger)
+        ILoggerService logger,
+        ISmartWifiService? smartWifiService = null)
     {
         _configService = configService;
         _adapterManager = adapterManager;
         _osModeService = osModeService;
         _logger = logger;
+        _smartWifiService = smartWifiService;
     }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
@@ -135,6 +139,31 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
             _disconnectedSeconds += settings.CheckIntervalSeconds;
             _logger.Log(AppLogLevel.Warning, "Watchdog", $"Toàn bộ máy chủ không phản hồi! Thời gian gián đoạn: {_disconnectedSeconds}s / {settings.MaxDisconnectedSecondsBeforeReset}s");
 
+            var smartWifiSettings = _configService.CurrentConfig.SmartWifiSettings;
+
+            // KIỂM TRA TẦNG 1: Tự động ngắt kết nối và chuyển sang Wi-Fi khác khi mất ping quá thời gian quy định
+            if (_smartWifiService != null &&
+                smartWifiSettings.EnablePingFailWifiSwitch &&
+                _smartWifiService.CurrentConnection.State == WifiState.Connected &&
+                !string.IsNullOrWhiteSpace(_smartWifiService.CurrentConnection.Ssid) &&
+                _disconnectedSeconds >= smartWifiSettings.PingFailWifiSwitchSeconds &&
+                (DateTime.UtcNow - _lastFailoverTime).TotalSeconds >= Math.Max(15, smartWifiSettings.PingFailWifiSwitchSeconds))
+            {
+                _logger.Log(AppLogLevel.Warning, "Watchdog",
+                    $"ĐÃ ĐẠT NGƯỠNG MẤT PING ({_disconnectedSeconds}s >= {smartWifiSettings.PingFailWifiSwitchSeconds}s). Tiến hành ngắt Wi-Fi hiện tại '{_smartWifiService.CurrentConnection.Ssid}' và chuyển sang mạng khác...");
+
+                _lastFailoverTime = DateTime.UtcNow;
+                _ = Task.Run(async () =>
+                {
+                    await _smartWifiService.TriggerFailoverToAlternativeNetworkAsync(
+                        $"Mất kết nối máy chủ liên tục {_disconnectedSeconds}s");
+                });
+
+                // Cấp thời gian chờ 10s (Grace Period) để Wi-Fi mới kết nối và nhận DHCP trước khi watchdog đếm lỗi tiếp
+                _disconnectedSeconds = Math.Max(0, _disconnectedSeconds - 10);
+            }
+
+            // KIỂM TRA TẦNG 2 & 3: Tự cứu hộ OS Mode và Reset card mạng phần cứng nếu vẫn mất mạng quá lâu
             var timeSinceLastReset = (DateTime.UtcNow - _lastResetTime).TotalSeconds;
             if (_disconnectedSeconds >= settings.MaxDisconnectedSecondsBeforeReset && timeSinceLastReset >= settings.ResetCooldownSeconds)
             {

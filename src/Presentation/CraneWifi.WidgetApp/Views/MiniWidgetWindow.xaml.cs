@@ -38,6 +38,7 @@ public partial class MiniWidgetWindow : Window
         // Wire service events
         _wifiService.ConnectionChanged += WifiService_ConnectionChanged;
         _wifiService.Roamed += WifiService_Roamed;
+        _wifiService.FailoverTriggered += WifiService_FailoverTriggered;
         _watchdogService.WatchdogTick += WatchdogService_WatchdogTick;
         _watchdogService.AdapterResetting += WatchdogService_AdapterResetting;
         _watchdogService.AdapterResetCompleted += WatchdogService_AdapterResetCompleted;
@@ -126,6 +127,16 @@ public partial class MiniWidgetWindow : Window
         {
             TxtStatusBadge.Text = $"Đã chuyển BSSID ({e.ToBssid.Substring(Math.Max(0, e.ToBssid.Length - 5))})";
             TxtStatusBadge.Foreground = (Brush)FindResource("CyanAccentBrush");
+        });
+    }
+
+    private void WifiService_FailoverTriggered(object? sender, WifiFailoverEventArgs e)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            TxtStatusBadge.Text = $"Mất ping! Đổi sang {e.TargetSsid}";
+            TxtStatusBadge.Foreground = (Brush)FindResource("AmberWarningBrush");
+            StartPulseAnimation();
         });
     }
 

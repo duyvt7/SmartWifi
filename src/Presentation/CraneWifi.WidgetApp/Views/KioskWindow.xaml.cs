@@ -79,6 +79,7 @@ public partial class KioskWindow : Window
         _watchdogService.WatchdogTick += WatchdogService_WatchdogTick;
         _wifiService.ConnectionChanged += WifiService_ConnectionChanged;
         _wifiService.Roamed += WifiService_Roamed;
+        _wifiService.FailoverTriggered += WifiService_FailoverTriggered;
         _logger.LogEmitted += Logger_LogEmitted;
     }
 
@@ -105,6 +106,17 @@ public partial class KioskWindow : Window
         ChkEnableRoaming.IsChecked = config.SmartWifiSettings.EnableSmartRoaming;
         SliderHysteresis.Value = config.SmartWifiSettings.RoamingHysteresisDeltaPercent;
         TxtHysteresisValue.Text = $"+{config.SmartWifiSettings.RoamingHysteresisDeltaPercent}%";
+
+        // Failover & Quarantine settings
+        ChkEnableFailover.IsChecked = config.SmartWifiSettings.EnablePingFailWifiSwitch;
+        SliderFailoverThreshold.Value = config.SmartWifiSettings.PingFailWifiSwitchSeconds;
+        TxtFailoverThresholdValue.Text = $"{config.SmartWifiSettings.PingFailWifiSwitchSeconds}s";
+
+        int blacklistMinutes = Math.Max(1, config.SmartWifiSettings.WifiBlacklistDurationSeconds / 60);
+        SliderBlacklistDuration.Value = blacklistMinutes;
+        TxtBlacklistDurationValue.Text = $"{blacklistMinutes} phút";
+
+        UpdateQuarantinedCountDisplay();
         RefreshPreferredWifiList();
 
         // OS settings
@@ -360,6 +372,73 @@ public partial class KioskWindow : Window
         await _wifiService.TriggerEvaluationNowAsync();
     }
 
+    private async void ChkEnableFailover_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!_isUiLoaded || _configService?.CurrentConfig == null) return;
+        var config = _configService.CurrentConfig;
+        config.SmartWifiSettings.EnablePingFailWifiSwitch = (ChkEnableFailover.IsChecked == true);
+        await _configService.SaveAsync(config);
+    }
+
+    private async void SliderFailoverThreshold_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!_isUiLoaded || TxtFailoverThresholdValue == null || _configService?.CurrentConfig == null) return;
+        int val = (int)e.NewValue;
+        TxtFailoverThresholdValue.Text = $"{val}s";
+
+        var config = _configService.CurrentConfig;
+        if (config.SmartWifiSettings.PingFailWifiSwitchSeconds != val)
+        {
+            config.SmartWifiSettings.PingFailWifiSwitchSeconds = val;
+            await _configService.SaveAsync(config);
+        }
+    }
+
+    private async void SliderBlacklistDuration_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!_isUiLoaded || TxtBlacklistDurationValue == null || _configService?.CurrentConfig == null) return;
+        int minutes = (int)e.NewValue;
+        TxtBlacklistDurationValue.Text = $"{minutes} phút";
+
+        var config = _configService.CurrentConfig;
+        int seconds = minutes * 60;
+        if (config.SmartWifiSettings.WifiBlacklistDurationSeconds != seconds)
+        {
+            config.SmartWifiSettings.WifiBlacklistDurationSeconds = seconds;
+            await _configService.SaveAsync(config);
+        }
+    }
+
+    private void BtnClearBlacklist_Click(object sender, RoutedEventArgs e)
+    {
+        _wifiService.ClearBlacklist();
+        UpdateQuarantinedCountDisplay();
+        MessageBox.Show("Đã xóa toàn bộ danh sách tạm khóa Wi-Fi. Các mạng đã có thể kết nối lại bình thường.", "Thông báo", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private void UpdateQuarantinedCountDisplay()
+    {
+        Dispatcher.Invoke(() =>
+        {
+            if (TxtQuarantinedCount == null) return;
+            var list = _wifiService.GetBlacklistedNetworks();
+            TxtQuarantinedCount.Text = $"Mạng đang bị khóa: {list.Count}";
+            if (list.Count > 0)
+            {
+                TxtQuarantinedCount.Foreground = (Brush)FindResource("AmberWarningBrush");
+            }
+            else
+            {
+                TxtQuarantinedCount.Foreground = (Brush)FindResource("TextSecondaryBrush");
+            }
+        });
+    }
+
+    private void WifiService_FailoverTriggered(object? sender, WifiFailoverEventArgs e)
+    {
+        UpdateQuarantinedCountDisplay();
+    }
+
     private async void CmbAdapters_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_isUiLoaded || _configService?.CurrentConfig == null) return;
@@ -439,15 +518,19 @@ public partial class KioskWindow : Window
             // Minimize to widget instead of closing
             e.Cancel = true;
             Hide();
-            _showMiniWidgetCallback();
+            _showMiniWidgetCallback?.Invoke();
         }
         else
         {
-            _clockTimer.Stop();
-            _watchdogService.WatchdogTick -= WatchdogService_WatchdogTick;
-            _wifiService.ConnectionChanged -= WifiService_ConnectionChanged;
-            _wifiService.Roamed -= WifiService_Roamed;
-            _logger.LogEmitted -= Logger_LogEmitted;
+            _clockTimer?.Stop();
+            if (_watchdogService != null) _watchdogService.WatchdogTick -= WatchdogService_WatchdogTick;
+            if (_wifiService != null)
+            {
+                _wifiService.ConnectionChanged -= WifiService_ConnectionChanged;
+                _wifiService.Roamed -= WifiService_Roamed;
+                _wifiService.FailoverTriggered -= WifiService_FailoverTriggered;
+            }
+            if (_logger != null) _logger.LogEmitted -= Logger_LogEmitted;
         }
     }
 

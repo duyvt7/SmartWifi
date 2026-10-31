@@ -131,4 +131,84 @@ public class CoreTests
         Assert.False(watchdog.IsRunning);
         Assert.Equal(0, watchdog.CurrentDisconnectedSeconds);
     }
+
+    [Fact]
+    public async Task ConfigService_IncludesFailoverAndBlacklistDefaults()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"test_config_{Guid.NewGuid()}.json");
+        try
+        {
+            var configService = new ConfigService(tempFile);
+            var config = await configService.LoadAsync();
+
+            Assert.True(config.SmartWifiSettings.EnablePingFailWifiSwitch);
+            Assert.Equal(15, config.SmartWifiSettings.PingFailWifiSwitchSeconds);
+            Assert.Equal(300, config.SmartWifiSettings.WifiBlacklistDurationSeconds);
+        }
+        finally
+        {
+            if (File.Exists(tempFile)) File.Delete(tempFile);
+        }
+    }
+
+    [Fact]
+    public void SmartWifiService_Blacklist_BlocksAndExpiresCorrectly()
+    {
+        var configService = new ConfigService();
+        var logger = new RollingFileLoggerService();
+        var wifiService = new Company.Module.SmartWifi.Services.SmartWifiService(configService, logger);
+
+        string testSsid = "BAD_PORT_WIFI";
+
+        // Initially not blacklisted
+        Assert.False(wifiService.IsSsidBlacklisted(testSsid));
+
+        // Blacklist for 1 second
+        wifiService.BlacklistSsid(testSsid, TimeSpan.FromMilliseconds(500), "Ping server failed");
+        Assert.True(wifiService.IsSsidBlacklisted(testSsid));
+
+        var list = wifiService.GetBlacklistedNetworks();
+        Assert.Single(list);
+        Assert.Equal(testSsid, list[0].Ssid);
+
+        // Sleep to allow expiration
+        Thread.Sleep(600);
+
+        // Should now be expired and automatically unblocked
+        Assert.False(wifiService.IsSsidBlacklisted(testSsid));
+        Assert.Empty(wifiService.GetBlacklistedNetworks());
+    }
+
+    [Fact]
+    public void SmartWifiService_ClearBlacklist_RemovesAllQuarantined()
+    {
+        var configService = new ConfigService();
+        var logger = new RollingFileLoggerService();
+        var wifiService = new Company.Module.SmartWifi.Services.SmartWifiService(configService, logger);
+
+        wifiService.BlacklistSsid("WIFI_1", TimeSpan.FromMinutes(10), "Test 1");
+        wifiService.BlacklistSsid("WIFI_2", TimeSpan.FromMinutes(10), "Test 2");
+
+        Assert.Equal(2, wifiService.GetBlacklistedNetworks().Count);
+
+        wifiService.ClearBlacklist();
+        Assert.Empty(wifiService.GetBlacklistedNetworks());
+        Assert.False(wifiService.IsSsidBlacklisted("WIFI_1"));
+        Assert.False(wifiService.IsSsidBlacklisted("WIFI_2"));
+    }
+
+    [Fact]
+    public void WatchdogService_ConstructsWithSmartWifiService()
+    {
+        var configService = new ConfigService();
+        var logger = new RollingFileLoggerService();
+        var osService = new OsModeService(configService, logger);
+        var adapterMgr = new NetworkAdapterManager(logger);
+        var wifiService = new Company.Module.SmartWifi.Services.SmartWifiService(configService, logger);
+
+        var watchdog = new ConnectionWatchdogService(configService, adapterMgr, osService, logger, wifiService);
+
+        Assert.NotNull(watchdog);
+        Assert.False(watchdog.IsRunning);
+    }
 }

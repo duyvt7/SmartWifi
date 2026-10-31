@@ -109,6 +109,9 @@ public class ConfigService : IConfigService
                 WeakSignalThresholdPercent = 45,
                 RoamingHysteresisDeltaPercent = 15,
                 EnableSmartRoaming = true,
+                EnablePingFailWifiSwitch = true,
+                PingFailWifiSwitchSeconds = 15,
+                WifiBlacklistDurationSeconds = 300,
                 PreferredNetworks = new List<PreferredNetwork>
                 {
                     new() { Ssid = "PORT_CRANE_5G", Password = "portpassword", Priority = 1, AutoConnect = true },

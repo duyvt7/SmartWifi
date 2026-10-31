@@ -45,7 +45,20 @@ public class SmartWifiSettings
     public int WeakSignalThresholdPercent { get; set; } = 45;
     public int RoamingHysteresisDeltaPercent { get; set; } = 15;
     public bool EnableSmartRoaming { get; set; } = true;
+    public bool EnablePingFailWifiSwitch { get; set; } = true;
+    public int PingFailWifiSwitchSeconds { get; set; } = 15;
+    public int WifiBlacklistDurationSeconds { get; set; } = 300;
     public List<PreferredNetwork> PreferredNetworks { get; set; } = new();
+}
+
+public class BlacklistedWifiInfo
+{
+    public string Ssid { get; set; } = string.Empty;
+    public string? Bssid { get; set; }
+    public DateTime QuarantinedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime ExpiryUtc { get; set; } = DateTime.UtcNow;
+    public string Reason { get; set; } = string.Empty;
+    public double RemainingSeconds => Math.Max(0, (ExpiryUtc - DateTime.UtcNow).TotalSeconds);
 }
 
 public class AppConfiguration

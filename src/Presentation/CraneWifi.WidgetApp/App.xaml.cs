@@ -101,8 +101,8 @@ public partial class App : System.Windows.Application
         services.AddSingleton<ILoggerService, RollingFileLoggerService>();
         services.AddSingleton<IOsModeService, OsModeService>();
         services.AddSingleton<INetworkAdapterManager, NetworkAdapterManager>();
-        services.AddSingleton<IConnectionWatchdogService, ConnectionWatchdogService>();
         services.AddSingleton<ISmartWifiService, SmartWifiService>();
+        services.AddSingleton<IConnectionWatchdogService, ConnectionWatchdogService>();
     }
 
     private void SetupSystemTray()
@@ -162,25 +162,35 @@ public partial class App : System.Windows.Application
     {
         Dispatcher.Invoke(() =>
         {
-            _miniWidget?.Hide();
-            if (_kioskWindow == null && _serviceProvider != null)
+            try
             {
-                // Lazy instantiation of KioskWindow only when user asks for it
-                _kioskWindow = new KioskWindow(
-                    _serviceProvider.GetRequiredService<IConfigService>(),
-                    _serviceProvider.GetRequiredService<ISmartWifiService>(),
-                    _serviceProvider.GetRequiredService<IConnectionWatchdogService>(),
-                    _serviceProvider.GetRequiredService<INetworkAdapterManager>(),
-                    _serviceProvider.GetRequiredService<IOsModeService>(),
-                    _serviceProvider.GetRequiredService<ILoggerService>(),
-                    showMiniWidgetCallback: ShowMiniWidget,
-                    exitAppCallback: ExitApplication);
-            }
+                _miniWidget?.Hide();
+                if (_kioskWindow == null && _serviceProvider != null)
+                {
+                    // Lazy instantiation of KioskWindow only when user asks for it
+                    _kioskWindow = new KioskWindow(
+                        _serviceProvider.GetRequiredService<IConfigService>(),
+                        _serviceProvider.GetRequiredService<ISmartWifiService>(),
+                        _serviceProvider.GetRequiredService<IConnectionWatchdogService>(),
+                        _serviceProvider.GetRequiredService<INetworkAdapterManager>(),
+                        _serviceProvider.GetRequiredService<IOsModeService>(),
+                        _serviceProvider.GetRequiredService<ILoggerService>(),
+                        showMiniWidgetCallback: ShowMiniWidget,
+                        exitAppCallback: ExitApplication);
+                }
 
-            if (_kioskWindow != null)
+                if (_kioskWindow != null)
+                {
+                    _kioskWindow.Show();
+                    _kioskWindow.Activate();
+                }
+            }
+            catch (Exception ex)
             {
-                _kioskWindow.Show();
-                _kioskWindow.Activate();
+                var logger = _serviceProvider?.GetService<ILoggerService>();
+                logger?.Log(AppLogLevel.Error, "KioskWindow", $"Lỗi khi mở bảng điều khiển Kiosk: {ex.Message}\n{ex.StackTrace}");
+                MessageBox.Show($"Không thể mở Bảng điều khiển Kiosk: {ex.Message}", "Lỗi giao diện", MessageBoxButton.OK, MessageBoxImage.Error);
+                ShowMiniWidget();
             }
         });
     }

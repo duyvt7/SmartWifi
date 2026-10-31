@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using Company.Core.Abstractions.Enums;
@@ -23,8 +24,12 @@ public class SmartWifiService : ISmartWifiService, IDisposable
     private readonly Dictionary<string, int> _roamCandidateStreaks = new();
     private DateTime _lastScanTime = DateTime.MinValue;
 
+    // Temporary Blacklist / Quarantine for SSIDs that fail server ping
+    private readonly ConcurrentDictionary<string, BlacklistedWifiInfo> _blacklistedNetworks = new(StringComparer.OrdinalIgnoreCase);
+
     public event EventHandler<WifiConnectionInfo>? ConnectionChanged;
     public event EventHandler<WifiRoamingEventArgs>? Roamed;
+    public event EventHandler<WifiFailoverEventArgs>? FailoverTriggered;
 
     public bool IsRunning => _monitorTask != null && !_monitorTask.IsCompleted;
     public WifiConnectionInfo CurrentConnection => _currentConnection;
@@ -332,6 +337,9 @@ public class SmartWifiService : ISmartWifiService, IDisposable
         // 1. If currently connected, check if there is a better BSSID for current SSID
         if (_currentConnection.State == WifiState.Connected && !string.IsNullOrWhiteSpace(_currentConnection.Ssid))
         {
+            // If current SSID is blacklisted (e.g. from ping failure), do not roam within this bad SSID
+            if (IsSsidBlacklisted(_currentConnection.Ssid)) return;
+
             var sameSsidCandidates = bssList
                 .Where(b => string.Equals(b.Ssid, _currentConnection.Ssid, StringComparison.OrdinalIgnoreCase))
                 .Where(b => !string.Equals(b.Bssid, _currentConnection.Bssid, StringComparison.OrdinalIgnoreCase))
@@ -370,16 +378,16 @@ public class SmartWifiService : ISmartWifiService, IDisposable
         }
         else if (_currentConnection.State == WifiState.Disconnected)
         {
-            // Auto connect to best preferred network
+            // Auto connect to best preferred network (ignoring blacklisted SSIDs)
             var preferred = settings.PreferredNetworks
-                .Where(p => p.AutoConnect)
+                .Where(p => p.AutoConnect && !IsSsidBlacklisted(p.Ssid))
                 .OrderBy(p => p.Priority)
                 .ToList();
 
             foreach (var pref in preferred)
             {
                 var candidate = bssList.FirstOrDefault(b => string.Equals(b.Ssid, pref.Ssid, StringComparison.OrdinalIgnoreCase));
-                if (candidate != null)
+                if (candidate != null && !IsSsidBlacklisted(candidate.Ssid))
                 {
                     _logger.Log(AppLogLevel.Info, "SmartWifi", $"Đang tự động kết nối lại vào mạng ưu tiên '{pref.Ssid}' (Sóng: {candidate.SignalQualityPercent}%)...");
                     bool connected = await ConnectToPreferredProfileAsync(pref.Ssid, pref.Password);
@@ -494,6 +502,173 @@ public class SmartWifiService : ISmartWifiService, IDisposable
     public async Task TriggerEvaluationNowAsync()
     {
         await EvaluateBssListAndRoamAsync();
+    }
+
+    public Task<bool> DisconnectAsync()
+    {
+        if (_clientHandle == IntPtr.Zero || _activeInterfaceGuid == Guid.Empty)
+            return Task.FromResult(false);
+
+        var guid = _activeInterfaceGuid;
+        uint res = WlanNativeApi.WlanDisconnect(_clientHandle, ref guid, IntPtr.Zero);
+        bool success = (res == 0);
+        if (success)
+        {
+            _logger.Log(AppLogLevel.Info, "SmartWifi", "Đã thực thi ngắt kết nối Wi-Fi hiện tại (WlanDisconnect).");
+            UpdateCurrentConnectionPassive();
+        }
+        else
+        {
+            _logger.Log(AppLogLevel.Warning, "SmartWifi", $"Lệnh WlanDisconnect trả về mã lỗi: {res}");
+        }
+        return Task.FromResult(success);
+    }
+
+    public bool IsSsidBlacklisted(string ssid)
+    {
+        if (string.IsNullOrWhiteSpace(ssid)) return false;
+        if (_blacklistedNetworks.TryGetValue(ssid, out var info))
+        {
+            if (DateTime.UtcNow < info.ExpiryUtc)
+            {
+                return true;
+            }
+            else
+            {
+                _blacklistedNetworks.TryRemove(ssid, out _);
+                _logger.Log(AppLogLevel.Info, "SmartWifi", $"Hết thời gian tạm khóa (Quarantine) của mạng '{ssid}'. Đã mở lại cho kết nối.");
+            }
+        }
+        return false;
+    }
+
+    public void BlacklistSsid(string ssid, TimeSpan duration, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(ssid)) return;
+        var now = DateTime.UtcNow;
+        var info = new BlacklistedWifiInfo
+        {
+            Ssid = ssid,
+            QuarantinedAtUtc = now,
+            ExpiryUtc = now.Add(duration),
+            Reason = reason
+        };
+        _blacklistedNetworks[ssid] = info;
+        _logger.Log(AppLogLevel.Warning, "SmartWifi",
+            $"ĐÃ TẠM KHÓA MẠNG '{ssid}' trong {(int)duration.TotalSeconds}s (Hết hạn: {info.ExpiryUtc.ToLocalTime():HH:mm:ss}). Lý do: {reason}");
+    }
+
+    public void RemoveFromBlacklist(string ssid)
+    {
+        if (!string.IsNullOrWhiteSpace(ssid) && _blacklistedNetworks.TryRemove(ssid, out _))
+        {
+            _logger.Log(AppLogLevel.Info, "SmartWifi", $"Đã xóa thủ công mạng '{ssid}' khỏi danh sách tạm khóa.");
+        }
+    }
+
+    public void ClearBlacklist()
+    {
+        _blacklistedNetworks.Clear();
+        _logger.Log(AppLogLevel.Info, "SmartWifi", "Đã xóa toàn bộ danh sách tạm khóa Wi-Fi.");
+    }
+
+    public IReadOnlyList<BlacklistedWifiInfo> GetBlacklistedNetworks()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var kvp in _blacklistedNetworks)
+        {
+            if (now >= kvp.Value.ExpiryUtc)
+            {
+                _blacklistedNetworks.TryRemove(kvp.Key, out _);
+            }
+        }
+        return _blacklistedNetworks.Values.ToList().AsReadOnly();
+    }
+
+    public async Task<bool> TriggerFailoverToAlternativeNetworkAsync(string reason)
+    {
+        var currentSsid = _currentConnection.Ssid;
+        var currentBssid = _currentConnection.Bssid;
+        var settings = _configService.CurrentConfig.SmartWifiSettings;
+        int blacklistSec = settings.WifiBlacklistDurationSeconds > 0 ? settings.WifiBlacklistDurationSeconds : 300;
+
+        _logger.Log(AppLogLevel.Warning, "SmartWifi",
+            $"KÍCH HOẠT WI-FI FAILOVER: Mạng '{currentSsid}' mất thông kết nối tới Server. Đang tiến hành cách ly và chuyển mạng...");
+
+        // 1. Blacklist current SSID
+        if (!string.IsNullOrWhiteSpace(currentSsid))
+        {
+            BlacklistSsid(currentSsid, TimeSpan.FromSeconds(blacklistSec), reason);
+        }
+
+        // 2. Disconnect current Wi-Fi
+        await DisconnectAsync();
+
+        // 3. Scan nearby BSS to refresh cached view
+        var bssList = await GetNearbyBssListAsync(forceScan: true);
+
+        // 4. Find best alternative preferred network that is NOT blacklisted
+        var alternativePreferred = settings.PreferredNetworks
+            .Where(p => p.AutoConnect && !IsSsidBlacklisted(p.Ssid) && !string.Equals(p.Ssid, currentSsid, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(p => p.Priority)
+            .ToList();
+
+        PreferredNetwork? chosenNetwork = null;
+        foreach (var pref in alternativePreferred)
+        {
+            var bssCandidate = bssList.FirstOrDefault(b => string.Equals(b.Ssid, pref.Ssid, StringComparison.OrdinalIgnoreCase));
+            if (bssCandidate != null)
+            {
+                chosenNetwork = pref;
+                break;
+            }
+        }
+
+        // If none of the in-range candidates matched preferred list yet, try first non-blacklisted preferred network anyway
+        if (chosenNetwork == null && alternativePreferred.Count > 0)
+        {
+            chosenNetwork = alternativePreferred.First();
+        }
+
+        if (chosenNetwork == null)
+        {
+            _logger.Log(AppLogLevel.Error, "SmartWifi",
+                "Không tìm thấy mạng Wi-Fi thay thế hợp lệ nào (Tất cả mạng ưu tiên đều đã bị khóa hoặc chưa được cấu hình).");
+            return false;
+        }
+
+        _logger.Log(AppLogLevel.Info, "SmartWifi",
+            $"Đang chuyển kết nối sang mạng thay thế '{chosenNetwork.Ssid}' (Ưu tiên {chosenNetwork.Priority})...");
+
+        bool connected = await ConnectToPreferredProfileAsync(chosenNetwork.Ssid, chosenNetwork.Password);
+
+        try
+        {
+            FailoverTriggered?.Invoke(this, new WifiFailoverEventArgs
+            {
+                PreviousSsid = currentSsid,
+                PreviousBssid = currentBssid,
+                TargetSsid = chosenNetwork.Ssid,
+                DisconnectedSeconds = 0,
+                BlacklistDurationSeconds = blacklistSec,
+                Reason = reason,
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        catch { }
+
+        if (connected)
+        {
+            _logger.Log(AppLogLevel.Success, "SmartWifi",
+                $"Đã chuyển kết nối thành công sang mạng thay thế '{chosenNetwork.Ssid}'!");
+        }
+        else
+        {
+            _logger.Log(AppLogLevel.Warning, "SmartWifi",
+                $"Lệnh kết nối sang mạng thay thế '{chosenNetwork.Ssid}' chưa thành công. Chờ Watchdog đánh giá lại.");
+        }
+
+        return connected;
     }
 
     private async Task ProvisionProfilesFromConfigAsync()

@@ -13,6 +13,17 @@ public class WifiRoamingEventArgs : EventArgs
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
 }
 
+public class WifiFailoverEventArgs : EventArgs
+{
+    public string PreviousSsid { get; set; } = string.Empty;
+    public string? PreviousBssid { get; set; }
+    public string TargetSsid { get; set; } = string.Empty;
+    public int DisconnectedSeconds { get; set; }
+    public int BlacklistDurationSeconds { get; set; }
+    public string Reason { get; set; } = string.Empty;
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+}
+
 public class AdapterResettingEventArgs : EventArgs
 {
     public string AdapterName { get; set; } = string.Empty;

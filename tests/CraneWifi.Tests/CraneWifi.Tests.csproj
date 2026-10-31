@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\Modules\Company.Module.ConfigManager\Company.Module.ConfigManager.csproj" />
     <ProjectReference Include="..\..\src\Modules\Company.Module.NetworkWatchdog\Company.Module.NetworkWatchdog.csproj" />
     <ProjectReference Include="..\..\src\Modules\Company.Module.OsTweaks\Company.Module.OsTweaks.csproj" />
+    <ProjectReference Include="..\..\src\Modules\Company.Module.SmartWifi\Company.Module.SmartWifi.csproj" />
   </ItemGroup>
 
 </Project>

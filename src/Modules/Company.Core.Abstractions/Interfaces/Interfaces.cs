@@ -64,8 +64,16 @@ public interface ISmartWifiService
     Task<IReadOnlyList<BssNetworkInfo>> GetNearbyBssListAsync(bool forceScan = false);
     Task<bool> FastRoamToBssidAsync(string bssid, string ssid);
     Task<bool> ConnectToPreferredProfileAsync(string ssid, string password);
+    Task<bool> DisconnectAsync();
+    Task<bool> TriggerFailoverToAlternativeNetworkAsync(string reason);
+    bool IsSsidBlacklisted(string ssid);
+    void BlacklistSsid(string ssid, TimeSpan duration, string reason);
+    void RemoveFromBlacklist(string ssid);
+    void ClearBlacklist();
+    IReadOnlyList<BlacklistedWifiInfo> GetBlacklistedNetworks();
     Task TriggerEvaluationNowAsync();
     event EventHandler<WifiConnectionInfo>? ConnectionChanged;
     event EventHandler<WifiRoamingEventArgs>? Roamed;
+    event EventHandler<WifiFailoverEventArgs>? FailoverTriggered;
 }
 

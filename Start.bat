@@ -37,7 +37,24 @@ if exist "%USERPROFILE%\.dotnet\dotnet.exe" (
     exit /b
 )
 
-:: 4. Nếu máy chưa có .NET Desktop Runtime, hiển thị thông báo hướng dẫn
+:: 4. Nếu máy chưa có .NET Desktop Runtime, kiểm tra xem có file cài đặt sẵn không
+if exist "%~dp0windowsdesktop-runtime-8.0-win-x64.exe" (
+    echo.
+    echo =========================================================================
+    echo [THÔNG BÁO] Máy tính chưa có .NET 8.0 Desktop Runtime.
+    echo [OK] Tìm thấy file cài đặt có sẵn: windowsdesktop-runtime-8.0-win-x64.exe
+    echo.
+    echo Đang khởi chạy trình cài đặt .NET 8 Desktop Runtime của Microsoft...
+    echo Vui lòng bấm "Install" trong cửa sổ cài đặt vừa xuất hiện.
+    echo =========================================================================
+    echo.
+    "%~dp0windowsdesktop-runtime-8.0-win-x64.exe"
+    echo.
+    echo Sau khi cài đặt .NET 8 xong, vui lòng nhấp đúp lại vào Start.bat!
+    pause
+    exit /b
+)
+
 echo.
 echo =========================================================================
 echo [THÔNG BÁO] Không thể khởi động Crane Wi-Fi Controller!
