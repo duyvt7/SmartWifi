@@ -1,3 +1,10 @@
+/**
+ * @Module: Company.Module.OsTweaks.OsModeService
+ * @Purpose: Quản lý và cưỡng chế tắt các chế độ can thiệp mạng của Windows (Chế độ máy bay - Airplane Mode, Chế độ máy tính bảng - Tablet Mode), đồng thời quản lý tự khởi động cùng Windows bằng Task Scheduler với quyền quản trị Administrator cao nhất.
+ * @Dependencies: Microsoft.Win32.Registry, System.Diagnostics, Company.Core.Abstractions.
+ * @Reusability: Độc lập hoàn toàn, dễ dàng tích hợp vào bất kỳ ứng dụng công nghiệp, POS, Kiosk nào cần khóa Desktop và ngăn chặn người dùng hoặc hệ thống tự kích hoạt Airplane Mode.
+ */
+
 using System.Diagnostics;
 using Microsoft.Win32;
 using Company.Core.Abstractions.Enums;
@@ -6,6 +13,9 @@ using Company.Core.Abstractions.Models;
 
 namespace Company.Module.OsTweaks.Services;
 
+/// <summary>
+/// Dịch vụ can thiệp Registry và Task Scheduler để khóa và tối ưu chế độ hoạt động của Windows.
+/// </summary>
 public class OsModeService : IOsModeService
 {
     private const string TaskSchedulerTaskName = "CraneWifiController";
@@ -14,12 +24,18 @@ public class OsModeService : IOsModeService
     private CancellationTokenSource? _cts;
     private Task? _monitoringTask;
 
+    /// <summary>
+    /// Khởi tạo OsModeService với cấu hình và logger.
+    /// </summary>
     public OsModeService(IConfigService configService, ILoggerService logger)
     {
         _configService = configService;
         _logger = logger;
     }
 
+    /// <summary>
+    /// Cưỡng chế tắt Chế độ máy bay, Tablet Mode và kiểm tra trạng thái Task Scheduler.
+    /// </summary>
     public async Task<SystemModeStatus> EnforceOsModesAsync()
     {
         var isAirplaneOff = await EnsureAirplaneModeDisabledAsync();
@@ -35,11 +51,14 @@ public class OsModeService : IOsModeService
         };
     }
 
+    /// <summary>
+    /// Kiểm tra xem Windows có đang ở Chế độ máy bay (SystemRadioState = 1) hay không.
+    /// </summary>
     public Task<bool> IsAirplaneModeEnabledAsync()
     {
         try
         {
-            // 1. Check Subkey HKLM\SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState (default value)
+            // 1. Kiểm tra khóa con HKLM\SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState
             using var subKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState");
             if (subKey != null)
             {
@@ -50,7 +69,7 @@ public class OsModeService : IOsModeService
                 }
             }
 
-            // 2. Check parent key value
+            // 2. Kiểm tra giá trị khóa cha
             using var parentKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement");
             if (parentKey != null)
             {
@@ -69,6 +88,9 @@ public class OsModeService : IOsModeService
         return Task.FromResult(false);
     }
 
+    /// <summary>
+    /// Kiểm tra xem Windows có đang ở Chế độ máy tính bảng (Tablet Mode = 1) hay không.
+    /// </summary>
     public Task<bool> IsTabletModeEnabledAsync()
     {
         try
@@ -91,13 +113,16 @@ public class OsModeService : IOsModeService
         return Task.FromResult(false);
     }
 
+    /// <summary>
+    /// Tắt Chế độ máy bay trong Registry và khởi động lại dịch vụ Wi-Fi nếu bị treo.
+    /// </summary>
     public Task<bool> DisableAirplaneModeAsync()
     {
         bool changed = false;
 
         try
         {
-            // 1. Set SystemRadioState subkey default value to 0
+            // 1. Ghi giá trị mặc định của SystemRadioState = 0
             using var subKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement\SystemRadioState", writable: true);
             if (subKey != null)
             {
@@ -105,7 +130,7 @@ public class OsModeService : IOsModeService
                 changed = true;
             }
 
-            // 2. Set SystemRadioState in parent key to 0
+            // 2. Ghi giá trị SystemRadioState trong khóa cha = 0
             using var parentKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\RadioManagement", writable: true);
             if (parentKey != null)
             {
@@ -123,7 +148,7 @@ public class OsModeService : IOsModeService
             _logger.Log(AppLogLevel.Warning, "OsTweaks", $"Lỗi vô hiệu hóa Airplane Mode trong Registry: {ex.Message}");
         }
 
-        // 3. Ensure WlanSvc (WLAN AutoConfig) is running
+        // 3. Đảm bảo dịch vụ WlanSvc (WLAN AutoConfig) đang chạy
         try
         {
             var psi = new ProcessStartInfo
@@ -138,7 +163,7 @@ public class OsModeService : IOsModeService
         }
         catch { }
 
-        // 4. Ensure Wi-Fi adapter is enabled via netsh
+        // 4. Kích hoạt lại card Wi-Fi nếu đang bị admin disable
         try
         {
             var psiNetsh = new ProcessStartInfo
@@ -156,6 +181,9 @@ public class OsModeService : IOsModeService
         return Task.FromResult(true);
     }
 
+    /// <summary>
+    /// Tắt Chế độ Tablet Mode và khóa giao diện về Desktop Mode.
+    /// </summary>
     public Task<bool> DisableTabletModeAsync()
     {
         try
@@ -177,6 +205,9 @@ public class OsModeService : IOsModeService
         return Task.FromResult(false);
     }
 
+    /// <summary>
+    /// Kiểm tra và tự động tắt ngay lập tức nếu phát hiện Airplane Mode hoặc Tablet Mode đang bật.
+    /// </summary>
     public async Task<bool> CheckAndDisableIfActiveAsync()
     {
         bool wasAirplaneActive = await IsAirplaneModeEnabledAsync();
@@ -196,16 +227,25 @@ public class OsModeService : IOsModeService
         return false;
     }
 
+    /// <summary>
+    /// Đảm bảo Airplane Mode bị tắt hoàn toàn.
+    /// </summary>
     public Task<bool> EnsureAirplaneModeDisabledAsync()
     {
         return DisableAirplaneModeAsync();
     }
 
+    /// <summary>
+    /// Đảm bảo Tablet Mode bị tắt hoàn toàn.
+    /// </summary>
     public Task<bool> EnsureTabletModeDisabledAsync()
     {
         return DisableTabletModeAsync();
     }
 
+    /// <summary>
+    /// Kiểm tra ứng dụng đã được đăng ký Task Scheduler tự chạy khi khởi động hay chưa.
+    /// </summary>
     public Task<bool> IsAutoStartRegisteredAsync()
     {
         try
@@ -231,6 +271,9 @@ public class OsModeService : IOsModeService
         }
     }
 
+    /// <summary>
+    /// Đăng ký hoặc hủy đăng ký tự khởi động cùng Windows qua Task Scheduler với quyền cao nhất (rl highest).
+    /// </summary>
     public Task<bool> SetAutoStartAsync(bool enable)
     {
         try
@@ -240,7 +283,6 @@ public class OsModeService : IOsModeService
                 var exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
                 if (string.IsNullOrEmpty(exePath)) return Task.FromResult(false);
 
-                // Create task triggered at logon with highest privileges to bypass UAC
                 var psi = new ProcessStartInfo
                 {
                     FileName = "schtasks.exe",
@@ -294,6 +336,9 @@ public class OsModeService : IOsModeService
         }
     }
 
+    /// <summary>
+    /// Bắt đầu vòng lặp giám sát OS Mode ngầm (kiểm tra mỗi 3 giây).
+    /// </summary>
     public Task StartMonitoringAsync(CancellationToken cancellationToken = default)
     {
         if (_monitoringTask != null) return Task.CompletedTask;
@@ -304,6 +349,9 @@ public class OsModeService : IOsModeService
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Dừng vòng lặp giám sát OS Mode ngầm.
+    /// </summary>
     public async Task StopMonitoringAsync()
     {
         if (_cts != null)
@@ -326,12 +374,11 @@ public class OsModeService : IOsModeService
 
     private async Task MonitorLoopAsync(CancellationToken ct)
     {
-        // Immediate first run
+        // Thực thi ngay lần đầu
         await EnforceOsModesAsync();
 
         while (!ct.IsCancellationRequested)
         {
-            // Check frequently (every 3 seconds) to immediately block if user turns on Airplane or Tablet mode
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(3), ct);

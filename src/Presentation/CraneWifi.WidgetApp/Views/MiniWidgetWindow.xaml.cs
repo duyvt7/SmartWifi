@@ -257,8 +257,11 @@ public partial class MiniWidgetWindow : Window
     private void MiniWidgetWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         // Unwire events to prevent leaks
+        Loaded -= MiniWidgetWindow_Loaded;
+        Closing -= MiniWidgetWindow_Closing;
         _wifiService.ConnectionChanged -= WifiService_ConnectionChanged;
         _wifiService.Roamed -= WifiService_Roamed;
+        _wifiService.FailoverTriggered -= WifiService_FailoverTriggered;
         _watchdogService.WatchdogTick -= WatchdogService_WatchdogTick;
         _watchdogService.AdapterResetting -= WatchdogService_AdapterResetting;
         _watchdogService.AdapterResetCompleted -= WatchdogService_AdapterResetCompleted;

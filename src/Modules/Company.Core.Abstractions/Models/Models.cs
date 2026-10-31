@@ -1,7 +1,17 @@
+/**
+ * @Module: Company.Core.Abstractions.Models
+ * @Purpose: Định nghĩa cấu trúc dữ liệu DTO/POCO cho toàn bộ hệ thống Crane Wi-Fi Controller (Cấu hình, Thông tin Wi-Fi, BSS, Trạng thái Ping, Card mạng, Nhật ký).
+ * @Dependencies: Company.Core.Abstractions.Enums.
+ * @Reusability: Độc lập hoàn toàn, dễ dàng serialize/deserialize JSON, dùng được cho cả Backend, Console CLI và Giao diện UI.
+ */
+
 using Company.Core.Abstractions.Enums;
 
 namespace Company.Core.Abstractions.Models;
 
+/// <summary>
+/// Cấu hình can thiệp hệ điều hành Windows và vị trí hiển thị giao diện.
+/// </summary>
 public class SystemSettings
 {
     public bool DisableAirplaneModeOnStartup { get; set; } = true;
@@ -13,6 +23,9 @@ public class SystemSettings
     public bool AutoStartWithWindows { get; set; } = true;
 }
 
+/// <summary>
+/// Định nghĩa thông tin máy chủ mục tiêu cần ping giám sát kết nối.
+/// </summary>
 public class TargetServer
 {
     public string Name { get; set; } = string.Empty;
@@ -20,6 +33,9 @@ public class TargetServer
     public bool IsEnabled { get; set; } = true;
 }
 
+/// <summary>
+/// Cấu hình cho dịch vụ Connection Watchdog và cứu hộ reset card mạng.
+/// </summary>
 public class WatchdogSettings
 {
     public int CheckIntervalSeconds { get; set; } = 5;
@@ -30,6 +46,9 @@ public class WatchdogSettings
     public List<TargetServer> TargetServers { get; set; } = new();
 }
 
+/// <summary>
+/// Thông tin mạng Wi-Fi ưu tiên cần tự động kết nối theo thứ tự.
+/// </summary>
 public class PreferredNetwork
 {
     public string Ssid { get; set; } = string.Empty;
@@ -38,6 +57,9 @@ public class PreferredNetwork
     public bool AutoConnect { get; set; } = true;
 }
 
+/// <summary>
+/// Cấu hình cho thuật toán Smart Roaming và chuyển mạch Wi-Fi khi mất ping (Failover).
+/// </summary>
 public class SmartWifiSettings
 {
     public int PassiveCheckIntervalSeconds { get; set; } = 2;
@@ -51,6 +73,9 @@ public class SmartWifiSettings
     public List<PreferredNetwork> PreferredNetworks { get; set; } = new();
 }
 
+/// <summary>
+/// Thông tin mạng Wi-Fi đang bị cách ly tạm thời (Blacklist/Quarantine).
+/// </summary>
 public class BlacklistedWifiInfo
 {
     public string Ssid { get; set; } = string.Empty;
@@ -61,6 +86,9 @@ public class BlacklistedWifiInfo
     public double RemainingSeconds => Math.Max(0, (ExpiryUtc - DateTime.UtcNow).TotalSeconds);
 }
 
+/// <summary>
+/// Cấu hình gốc tổng thể của ứng dụng (Root Configuration).
+/// </summary>
 public class AppConfiguration
 {
     public SystemSettings SystemSettings { get; set; } = new();
@@ -68,6 +96,9 @@ public class AppConfiguration
     public SmartWifiSettings SmartWifiSettings { get; set; } = new();
 }
 
+/// <summary>
+/// Thông tin chi tiết về liên kết Wi-Fi hiện hành của máy tính.
+/// </summary>
 public class WifiConnectionInfo
 {
     public WifiState State { get; set; } = WifiState.Disconnected;
@@ -76,13 +107,16 @@ public class WifiConnectionInfo
     public int SignalQualityPercent { get; set; }
     public int RssiDbm { get; set; } = -100;
     public int Channel { get; set; }
-    public string Band { get; set; } = string.Empty; // e.g. "2.4 GHz" or "5 GHz"
+    public string Band { get; set; } = string.Empty;
     public string InterfaceName { get; set; } = string.Empty;
     public Guid InterfaceId { get; set; }
     public long? LinkSpeedMbps { get; set; }
     public DateTime LastUpdatedUtc { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>
+/// Thông tin về một trạm phát sóng (BSS) trong danh sách quét Native API.
+/// </summary>
 public class BssNetworkInfo
 {
     public string Ssid { get; set; } = string.Empty;
@@ -94,6 +128,9 @@ public class BssNetworkInfo
     public bool IsConnected { get; set; }
 }
 
+/// <summary>
+/// Kết quả kiểm tra phản hồi ICMP Ping tới một máy chủ.
+/// </summary>
 public class ServerPingStatus
 {
     public TargetServer Target { get; set; } = new();
@@ -103,16 +140,22 @@ public class ServerPingStatus
     public string? ErrorMessage { get; set; }
 }
 
+/// <summary>
+/// Thông tin về một Card mạng vật lý/logic trên hệ điều hành.
+/// </summary>
 public class NetworkAdapterInfo
 {
     public string Id { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty; // e.g. "Wi-Fi"
+    public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public bool IsWireless { get; set; }
     public bool IsOperational { get; set; }
     public string MacAddress { get; set; } = string.Empty;
 }
 
+/// <summary>
+/// Trạng thái tổng hợp về các chế độ Windows (Airplane, Tablet, Task Scheduler).
+/// </summary>
 public class SystemModeStatus
 {
     public bool IsAirplaneModeDisabled { get; set; }
@@ -121,6 +164,9 @@ public class SystemModeStatus
     public DateTime LastEnforcedUtc { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>
+/// Bản ghi nhật ký hoạt động của ứng dụng (Log Entry).
+/// </summary>
 public class LogEntry
 {
     public DateTime Timestamp { get; set; } = DateTime.Now;
@@ -128,4 +174,3 @@ public class LogEntry
     public string Source { get; set; } = string.Empty;
     public string Message { get; set; } = string.Empty;
 }
-

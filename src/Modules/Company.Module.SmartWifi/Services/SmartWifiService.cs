@@ -1,3 +1,10 @@
+/**
+ * @Module: Company.Module.SmartWifi.SmartWifiService
+ * @Purpose: Dịch vụ điều khiển kết nối Wi-Fi thông minh cho xe cẩu công nghiệp. Cung cấp: Quét BSS thụ động qua Native Windows API (tiết kiệm thời gian, không gây rớt gói), Roaming nhanh giữa các Access Point dựa trên thuật toán Hysteresis chống chập chờn (Flapping), Tự động chuyển mạng Wi-Fi (Failover) và Cách ly (Blacklist) tạm thời khi mất kết nối máy chủ.
+ * @Dependencies: Company.Core.Abstractions (Enums, Events, Interfaces, Models), Company.Module.SmartWifi.Interop (WlanNativeApi).
+ * @Reusability: Tách biệt hoàn toàn qua ISmartWifiService interface và DI (IConfigService, ILoggerService). Có thể tái sử dụng cho bất kỳ hệ thống AGV, xe nâng, cẩu cảng, thiết bị tự hành di chuyển liên tục trong mạng Wi-Fi diện rộng (Campus/Industrial Mesh).
+ */
+
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -9,6 +16,9 @@ using Company.Module.SmartWifi.Interop;
 
 namespace Company.Module.SmartWifi.Services;
 
+/// <summary>
+/// Dịch vụ điều khiển Wi-Fi thông minh: Roaming nhanh native BSS, Failover đa mạng và cách ly Blacklist.
+/// </summary>
 public class SmartWifiService : ISmartWifiService, IDisposable
 {
     private readonly IConfigService _configService;
@@ -752,6 +762,7 @@ public class SmartWifiService : ISmartWifiService, IDisposable
     {
         StopAsync().GetAwaiter().GetResult();
         CloseWlanHandle();
+        GC.SuppressFinalize(this);
     }
 }
 

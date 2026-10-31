@@ -1,3 +1,10 @@
+/**
+ * @Module: Company.Module.NetworkWatchdog.NetworkAdapterManager
+ * @Purpose: Quản lý danh sách card mạng hệ thống, nhận diện card Wi-Fi đang hoạt động và cung cấp cơ chế Reset phần cứng đa phương thức (Netsh, PowerShell Restart-NetAdapter, WMI) với cơ chế tự động thử lại tuần tự (fallback sequence).
+ * @Dependencies: System.Management, System.Net.NetworkInformation, Company.Core.Abstractions.
+ * @Reusability: Độc lập hoàn toàn, hỗ trợ mọi phiên bản Windows 10/11 x64, có thể tái sử dụng cho các ứng dụng chẩn đoán mạng, kiosk, tự phục hồi mạng IoT.
+ */
+
 using System.Diagnostics;
 using System.Management;
 using System.Net.NetworkInformation;
@@ -7,15 +14,26 @@ using Company.Core.Abstractions.Models;
 
 namespace Company.Module.NetworkWatchdog.Services;
 
+/// <summary>
+/// Quản lý thông tin card mạng và cơ chế phục hồi phần cứng.
+/// </summary>
 public class NetworkAdapterManager : INetworkAdapterManager
 {
     private readonly ILoggerService _logger;
 
+    /// <summary>
+    /// Khởi tạo NetworkAdapterManager với dịch vụ ghi log.
+    /// </summary>
+    /// <param name="logger">Dịch vụ ghi log.</param>
     public NetworkAdapterManager(ILoggerService logger)
     {
         _logger = logger;
     }
 
+    /// <summary>
+    /// Lấy danh sách tất cả các card mạng trên máy tính (bỏ qua loopback).
+    /// </summary>
+    /// <returns>Danh sách thông tin card mạng.</returns>
     public Task<IReadOnlyList<NetworkAdapterInfo>> GetAdaptersAsync()
     {
         var list = new List<NetworkAdapterInfo>();
@@ -51,11 +69,16 @@ public class NetworkAdapterManager : INetworkAdapterManager
         return Task.FromResult<IReadOnlyList<NetworkAdapterInfo>>(list);
     }
 
+    /// <summary>
+    /// Tìm card mạng Wi-Fi đang hoạt động hoặc theo tên ưu tiên cấu hình.
+    /// </summary>
+    /// <param name="preferredName">Tên card mạng ưu tiên (vd: 'Wi-Fi').</param>
+    /// <returns>Thông tin card mạng tìm thấy, hoặc null nếu không có.</returns>
     public async Task<NetworkAdapterInfo?> GetActiveWifiAdapterAsync(string? preferredName = null)
     {
         var adapters = await GetAdaptersAsync();
 
-        // 1. If preferred name specified, search for exact or substring match
+        // 1. Nếu có chỉ định tên ưu tiên, tìm kiếm chính xác hoặc chuỗi con
         if (!string.IsNullOrWhiteSpace(preferredName))
         {
             var match = adapters.FirstOrDefault(a => a.Name.Equals(preferredName, StringComparison.OrdinalIgnoreCase) ||
@@ -63,18 +86,24 @@ public class NetworkAdapterManager : INetworkAdapterManager
             if (match != null) return match;
         }
 
-        // 2. Look for operational wireless adapter
+        // 2. Tìm card không dây đang hoạt động (Operational)
         var activeWireless = adapters.FirstOrDefault(a => a.IsWireless && a.IsOperational);
         if (activeWireless != null) return activeWireless;
 
-        // 3. Fallback to any wireless adapter
+        // 3. Dự phòng bất kỳ card không dây nào có trên máy
         var anyWireless = adapters.FirstOrDefault(a => a.IsWireless);
         if (anyWireless != null) return anyWireless;
 
-        // 4. Default to adapter with "Wi-Fi" in name
+        // 4. Mặc định tìm card có chữ 'Wi-Fi' trong tên
         return adapters.FirstOrDefault(a => a.Name.Contains("Wi-Fi", StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <summary>
+    /// Thực hiện Reset card mạng khẩn cấp theo phương thức chỉ định (hoặc tự động fallback).
+    /// </summary>
+    /// <param name="adapterName">Tên card mạng.</param>
+    /// <param name="method">Phương thức reset (Auto, Netsh, PowerShell, Wmi).</param>
+    /// <returns>True nếu reset thành công.</returns>
     public async Task<bool> ResetAdapterAsync(string adapterName, AdapterResetMethod method = AdapterResetMethod.Auto)
     {
         _logger.Log(AppLogLevel.Warning, "AdapterManager", $"Bắt đầu quá trình Reset Card mạng '{adapterName}' (Phương thức: {method})...");
@@ -119,7 +148,7 @@ public class NetworkAdapterManager : INetworkAdapterManager
     {
         try
         {
-            // 1. Disable
+            // 1. Tắt card
             var psiDisable = new ProcessStartInfo
             {
                 FileName = "netsh.exe",
@@ -140,10 +169,10 @@ public class NetworkAdapterManager : INetworkAdapterManager
                 }
             }
 
-            // Wait 3 seconds for driver teardown
+            // Chờ 3 giây để driver giải phóng tài nguyên
             await Task.Delay(3000);
 
-            // 2. Enable
+            // 2. Bật lại card
             var psiEnable = new ProcessStartInfo
             {
                 FileName = "netsh.exe",
@@ -204,7 +233,7 @@ public class NetworkAdapterManager : INetworkAdapterManager
 
                 foreach (ManagementObject mo in searcher.Get())
                 {
-                    var disableResult = mo.InvokeMethod("Disable", null);
+                    _ = mo.InvokeMethod("Disable", null);
                     await Task.Delay(3000);
                     var enableResult = mo.InvokeMethod("Enable", null);
 
@@ -220,4 +249,3 @@ public class NetworkAdapterManager : INetworkAdapterManager
         });
     }
 }
-

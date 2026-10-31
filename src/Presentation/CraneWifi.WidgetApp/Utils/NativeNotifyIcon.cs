@@ -1,3 +1,10 @@
+/**
+ * @Module: CraneWifi.WidgetApp.Utils.NativeNotifyIcon
+ * @Purpose: Quản lý biểu tượng khay hệ thống (System Tray Notification Icon) thuần Windows Win32 API qua shell32 Shell_NotifyIcon và HwndSource, không cần kéo dependency cồng kềnh WinForms (System.Windows.Forms).
+ * @Dependencies: Windows shell32.dll, user32.dll, System.Windows.Interop.
+ * @Reusability: Cực kỳ gọn nhẹ, có thể tái sử dụng cho bất kỳ ứng dụng WPF nào cần System Tray icon native hiệu năng cao.
+ */
+
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -145,6 +152,7 @@ public class NativeNotifyIcon : IDisposable
         }
 
         _hwndSource.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
 

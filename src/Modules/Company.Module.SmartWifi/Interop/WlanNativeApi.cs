@@ -1,3 +1,10 @@
+/**
+ * @Module: Company.Module.SmartWifi.Interop.WlanNativeApi
+ * @Purpose: P/Invoke wrapper cho Windows Native Wi-Fi API (wlanapi.dll), cung cấp các hàm cấp thấp tương tác trực tiếp với Driver Wi-Fi (WlanOpenHandle, WlanEnumInterfaces, WlanGetNetworkBssList, WlanConnect, WlanScan, WlanSetProfile).
+ * @Dependencies: Windows wlanapi.dll.
+ * @Reusability: Cung cấp đầy đủ struct, enum và DllImport chuẩn Microsoft WLAN API, tái sử dụng cho bất kỳ module C# nào cần quản lý Wi-Fi native hiệu năng cao.
+ */
+
 using System.Runtime.InteropServices;
 using System.Text;
 

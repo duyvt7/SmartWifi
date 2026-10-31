@@ -1,3 +1,10 @@
+/**
+ * @Module: Company.Module.NetworkWatchdog.ConnectionWatchdogService
+ * @Purpose: Dịch vụ giám sát độ trễ và mất gói tin (ICMP Ping) định kỳ tới các máy chủ công nghiệp (TOS/Gateway), thực hiện cứu hộ đa tầng: Tự động ngắt & đổi Wi-Fi khi mất ping (Failover), can thiệp tắt Airplane/Tablet Mode, và Reset phần cứng card mạng khi mất mạng quá hạn.
+ * @Dependencies: Company.Core.Abstractions (Enums, Events, Interfaces, Models).
+ * @Reusability: Độc lập hoàn toàn qua Dependency Injection (IConfigService, INetworkAdapterManager, IOsModeService, ILoggerService, ISmartWifiService). Sẵn sàng tái sử dụng cho các hệ thống SCADA, cẩu giàn, IoT trên Windows.
+ */
+
 using System.Net.NetworkInformation;
 using System.Text;
 using Company.Core.Abstractions.Enums;
@@ -7,6 +14,9 @@ using Company.Core.Abstractions.Models;
 
 namespace Company.Module.NetworkWatchdog.Services;
 
+/// <summary>
+/// Dịch vụ Connection Watchdog giám sát Ping tới máy chủ và tự cứu hộ mạng đa tầng.
+/// </summary>
 public class ConnectionWatchdogService : IConnectionWatchdogService
 {
     private readonly IConfigService _configService;
@@ -22,14 +32,39 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
     private List<ServerPingStatus> _lastStatuses = new();
     private readonly byte[] _pingBuffer = Encoding.ASCII.GetBytes("CRANE_WIFI_WATCHDOG_PING_PACKET");
 
+    /// <summary>
+    /// Sự kiện kích hoạt định kỳ sau mỗi chu kỳ kiểm tra Ping.
+    /// </summary>
     public event EventHandler<WatchdogTickEventArgs>? WatchdogTick;
+
+    /// <summary>
+    /// Sự kiện kích hoạt ngay trước khi card mạng chuẩn bị được reset.
+    /// </summary>
     public event EventHandler<AdapterResettingEventArgs>? AdapterResetting;
+
+    /// <summary>
+    /// Sự kiện kích hoạt sau khi quá trình reset card mạng hoàn tất.
+    /// </summary>
     public event EventHandler? AdapterResetCompleted;
 
+    /// <summary>
+    /// Trạng thái hoạt động của tiến trình Watchdog.
+    /// </summary>
     public bool IsRunning => _workerTask != null && !_workerTask.IsCompleted;
+
+    /// <summary>
+    /// Số giây gián đoạn kết nối máy chủ liên tục hiện hành.
+    /// </summary>
     public int CurrentDisconnectedSeconds => _disconnectedSeconds;
+
+    /// <summary>
+    /// Danh sách kết quả phản hồi Ping gần nhất của các máy chủ.
+    /// </summary>
     public IReadOnlyList<ServerPingStatus> LastKnownStatuses => _lastStatuses.AsReadOnly();
 
+    /// <summary>
+    /// Khởi tạo ConnectionWatchdogService với các dịch vụ phụ thuộc.
+    /// </summary>
     public ConnectionWatchdogService(
         IConfigService configService,
         INetworkAdapterManager adapterManager,
@@ -44,6 +79,9 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
         _smartWifiService = smartWifiService;
     }
 
+    /// <summary>
+    /// Khởi động tiến trình giám sát Ping trong nền.
+    /// </summary>
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         if (IsRunning) return Task.CompletedTask;
@@ -54,6 +92,9 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Dừng tiến trình giám sát Ping.
+    /// </summary>
     public async Task StopAsync()
     {
         if (_cts != null)
@@ -74,6 +115,9 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
         }
     }
 
+    /// <summary>
+    /// Thực hiện kiểm tra Ping ngay lập tức mà không cần đợi hết chu kỳ.
+    /// </summary>
     public async Task TriggerCheckNowAsync()
     {
         await PerformSingleCheckAsync();
@@ -81,7 +125,7 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
 
     private async Task WatchdogLoopAsync(CancellationToken ct)
     {
-        // Immediate check on startup
+        // Kiểm tra ngay lập tức khi khởi động
         await PerformSingleCheckAsync();
 
         while (!ct.IsCancellationRequested)
@@ -118,7 +162,7 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
             return;
         }
 
-        // Ping all servers concurrently
+        // Ping đồng thời tất cả các máy chủ đang kích hoạt
         var tasks = activeServers.Select(s => PingServerAsync(s, settings.PingTimeoutMs)).ToList();
         var results = await Task.WhenAll(tasks);
         _lastStatuses = results.ToList();
@@ -184,7 +228,7 @@ public class ConnectionWatchdogService : IConnectionWatchdogService
         }
         catch
         {
-            // Suppress event subscriber exceptions
+            // Bảo vệ luồng Watchdog nếu subscriber ném ngoại lệ
         }
     }
 

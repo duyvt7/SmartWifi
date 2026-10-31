@@ -1,5 +1,15 @@
+/**
+ * @Module: Company.Core.Abstractions.Enums
+ * @Purpose: Định nghĩa các kiểu liệt kê Enums chuẩn cho trạng thái Wi-Fi, mức độ ghi log và phương thức reset card mạng.
+ * @Dependencies: Không có dependency bên ngoài.
+ * @Reusability: Tái sử dụng cho mọi tầng trong kiến trúc ứng dụng (Core, Module, UI).
+ */
+
 namespace Company.Core.Abstractions.Enums;
 
+/// <summary>
+/// Trạng thái kết nối của Wi-Fi client.
+/// </summary>
 public enum WifiState
 {
     Unknown = 0,
@@ -10,6 +20,9 @@ public enum WifiState
     Resetting = 5
 }
 
+/// <summary>
+/// Phân cấp mức độ nhật ký ứng dụng.
+/// </summary>
 public enum AppLogLevel
 {
     Info = 0,
@@ -18,6 +31,9 @@ public enum AppLogLevel
     Success = 3
 }
 
+/// <summary>
+/// Phương thức can thiệp để khởi động lại (Reset) card mạng Windows.
+/// </summary>
 public enum AdapterResetMethod
 {
     Auto = 0,
@@ -25,4 +41,3 @@ public enum AdapterResetMethod
     PowerShell = 2,
     Wmi = 3
 }
-

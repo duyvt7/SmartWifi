@@ -235,6 +235,9 @@ public partial class App : System.Windows.Application
             _miniWidget?.Close();
             _kioskWindow?.Close();
 
+            _serviceProvider?.Dispose();
+            _serviceProvider = null;
+
             Shutdown();
         }
         catch

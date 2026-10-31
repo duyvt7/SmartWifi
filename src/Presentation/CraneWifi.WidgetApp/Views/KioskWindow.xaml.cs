@@ -70,7 +70,7 @@ public partial class KioskWindow : Window
         PreferredWifiItemsControl.ItemsSource = _wifiItems;
 
         _clockTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        _clockTimer.Tick += (s, e) => TxtFooterTime.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        _clockTimer.Tick += ClockTimer_Tick;
         _clockTimer.Start();
 
         Loaded += KioskWindow_Loaded;
@@ -511,6 +511,11 @@ public partial class KioskWindow : Window
         }
     }
 
+    private void ClockTimer_Tick(object? sender, EventArgs e)
+    {
+        TxtFooterTime.Text = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+    }
+
     private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         if (!_isExplicitExit)
@@ -522,7 +527,12 @@ public partial class KioskWindow : Window
         }
         else
         {
-            _clockTimer?.Stop();
+            Loaded -= KioskWindow_Loaded;
+            if (_clockTimer != null)
+            {
+                _clockTimer.Stop();
+                _clockTimer.Tick -= ClockTimer_Tick;
+            }
             if (_watchdogService != null) _watchdogService.WatchdogTick -= WatchdogService_WatchdogTick;
             if (_wifiService != null)
             {
